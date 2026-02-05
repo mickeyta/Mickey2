@@ -541,9 +541,11 @@
                 'use strict';
                 var STORAGE_KEY = 'marketDataApiKey';
                 var API_BASE = 'https://api.twelvedata.com';
-                var _cache = {}, _histCache = {};
+                var _cache = {}, _histCache = {}, _exMap = {};
                 var _cacheTTL = 5 * 60 * 1000, _histTTL = 60 * 60 * 1000;
+                var US_EX = ['NYSE','NASDAQ'];
                 var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
+                function _resolved(s) { return _exMap[s] || s; }
                 function configure(options) {
                     if (options.cacheTTL !== undefined) _cacheTTL = options.cacheTTL;
                     if (options.apiKey !== undefined) { _apiKey = options.apiKey; localStorage.setItem(STORAGE_KEY, _apiKey); }
@@ -551,7 +553,7 @@
                 function getApiKey() { return _apiKey; }
                 function _dateStr(d) { var m=d.getMonth()+1, day=d.getDate(); return d.getFullYear()+'-'+(m<10?'0':'')+m+'-'+(day<10?'0':'')+day; }
                 async function _fetchTS(symbol, start, end) {
-                    var url = API_BASE+'/time_series?symbol='+encodeURIComponent(symbol)+'&interval=1day&start_date='+start+'&end_date='+end+'&outputsize=1&apikey='+encodeURIComponent(_apiKey);
+                    var url = API_BASE+'/time_series?symbol='+encodeURIComponent(_resolved(symbol))+'&interval=1day&start_date='+start+'&end_date='+end+'&outputsize=1&apikey='+encodeURIComponent(_apiKey);
                     var r = await fetch(url); if (!r.ok) return null; var j = await r.json();
                     if (j.code) return null;
                     return (j.values && j.values.length > 0) ? parseFloat(j.values[0].close) : null;
@@ -591,21 +593,29 @@
                     for (var j=0;j<upper.length;j++) { var s=upper[j]; result[s]=_histCache[s]?{ytdPrice:_histCache[s].ytdPrice,oneYearAgoPrice:_histCache[s].oneYearAgoPrice}:null; }
                     return result;
                 }
+                async function _fetchQuoteWithFallback(symbol) {
+                    var tries = [_resolved(symbol)];
+                    if (!_exMap[symbol]) { for (var x=0;x<US_EX.length;x++){var sf=symbol+':'+US_EX[x];if(tries.indexOf(sf)===-1)tries.push(sf);} }
+                    for (var t=0;t<tries.length;t++) {
+                        try {
+                            var url = API_BASE+'/quote?symbol='+encodeURIComponent(tries[t])+'&apikey='+encodeURIComponent(_apiKey);
+                            var r = await fetch(url); if(!r.ok) continue; var q = await r.json();
+                            if(q.code===401) throw new Error(q.message||'Invalid API key'); if(q.code) continue;
+                            if(q.symbol&&q.close){ _exMap[symbol]=tries[t]; return {price:parseFloat(q.close),previousClose:q.previous_close?parseFloat(q.previous_close):null,change:q.change?parseFloat(q.change):null,changePercent:q.percent_change?parseFloat(q.percent_change):null,currency:q.currency||'USD',name:q.name||q.symbol}; }
+                        } catch(e){ if(e.message&&e.message.indexOf('Invalid API key')!==-1) throw e; }
+                    }
+                    return null;
+                }
                 async function _fetchFromTwelveData(symbols) {
                     var out = {};
                     await Promise.all(symbols.map(function(symbol) {
-                        var url = API_BASE+'/quote?symbol='+encodeURIComponent(symbol)+'&apikey='+encodeURIComponent(_apiKey);
-                        return fetch(url).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
-                            .then(function(q){
-                                if(q.code===401)throw new Error(q.message||'Invalid API key');if(q.code===404)return;
-                                if(q.symbol&&q.close){out[q.symbol.toUpperCase()]={price:parseFloat(q.close),previousClose:q.previous_close?parseFloat(q.previous_close):null,change:q.change?parseFloat(q.change):null,changePercent:q.percent_change?parseFloat(q.percent_change):null,currency:q.currency||'USD',name:q.name||q.symbol};}
-                            }).catch(function(err){console.warn('Failed to fetch '+symbol+':',err.message);});
+                        return _fetchQuoteWithFallback(symbol).then(function(res){if(res)out[symbol]=res;}).catch(function(err){console.warn('Failed to fetch '+symbol+':',err.message);});
                     }));
                     return out;
                 }
                 function getCached(symbol) { var c=_cache[symbol.toUpperCase()]; if(!c)return null; var e=Object.assign({},c);delete e._ts;return e; }
                 function getHistorical(symbol) { var c=_histCache[symbol.toUpperCase()]; if(!c)return null; return {ytdPrice:c.ytdPrice,oneYearAgoPrice:c.oneYearAgoPrice}; }
-                function clearCache() { var k; for(k in _cache){if(_cache.hasOwnProperty(k))delete _cache[k];} for(k in _histCache){if(_histCache.hasOwnProperty(k))delete _histCache[k];} }
+                function clearCache() { var k; for(k in _cache){if(_cache.hasOwnProperty(k))delete _cache[k];} for(k in _histCache){if(_histCache.hasOwnProperty(k))delete _histCache[k];} for(k in _exMap){if(_exMap.hasOwnProperty(k))delete _exMap[k];} }
                 return { configure:configure, getApiKey:getApiKey, fetchQuotes:fetchQuotes, fetchHistorical:fetchHistorical, getCached:getCached, getHistorical:getHistorical, clearCache:clearCache };
             })();
         }

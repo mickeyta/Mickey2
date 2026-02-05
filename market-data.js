@@ -27,6 +27,8 @@ const MarketData = (function () {
     var _cacheTTL = 5 * 60 * 1000; // 5 minutes
     var _historicalCacheTTL = 60 * 60 * 1000; // 1 hour (historical data rarely changes)
     var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
+    var _exchangeMap = {}; // Cache resolved exchanges for ambiguous symbols
+    var US_EXCHANGES = ['NYSE', 'NASDAQ'];
 
     /**
      * Configure the service.
@@ -163,7 +165,8 @@ const MarketData = (function () {
      * @returns {Promise<number|null>}
      */
     async function _fetchTimeSeries(symbol, startDate, endDate) {
-        var url = API_BASE + '/time_series?symbol=' + encodeURIComponent(symbol) +
+        var resolved = _resolvedSymbol(symbol);
+        var url = API_BASE + '/time_series?symbol=' + encodeURIComponent(resolved) +
             '&interval=1day&start_date=' + startDate + '&end_date=' + endDate +
             '&outputsize=1&apikey=' + encodeURIComponent(_apiKey);
 
@@ -186,32 +189,74 @@ const MarketData = (function () {
     }
 
     /**
+     * Resolve the API symbol string for a given ticker.
+     * For ambiguous symbols (listed on multiple exchanges), tries US exchanges.
+     * Results are cached so subsequent calls don't waste API requests.
+     * @param {string} symbol - Plain ticker like "CAAP"
+     * @returns {string} Resolved symbol like "CAAP:NYSE" or plain "CAAP"
+     */
+    function _resolvedSymbol(symbol) {
+        return _exchangeMap[symbol] || symbol;
+    }
+
+    /**
+     * Try fetching a quote for a single symbol. If no data is returned,
+     * retry with US exchange suffixes (NYSE, NASDAQ).
+     * @param {string} symbol
+     * @returns {Promise<Object|null>} Parsed quote data or null
+     */
+    async function _fetchQuoteWithFallback(symbol) {
+        // If we already resolved this symbol's exchange, use it directly
+        var trySymbols = [_resolvedSymbol(symbol)];
+        // Only add fallbacks if we haven't resolved the exchange yet
+        if (!_exchangeMap[symbol]) {
+            for (var i = 0; i < US_EXCHANGES.length; i++) {
+                var suffixed = symbol + ':' + US_EXCHANGES[i];
+                if (trySymbols.indexOf(suffixed) === -1) trySymbols.push(suffixed);
+            }
+        }
+
+        for (var j = 0; j < trySymbols.length; j++) {
+            var sym = trySymbols[j];
+            var url = API_BASE + '/quote?symbol=' + encodeURIComponent(sym) + '&apikey=' + encodeURIComponent(_apiKey);
+            try {
+                var resp = await fetch(url);
+                if (!resp.ok) continue;
+                var q = await resp.json();
+                if (q.code && q.code === 401) throw new Error(q.message || 'Invalid API key');
+                if (q.code) continue;
+                if (q.symbol && q.close) {
+                    // Cache which exchange worked
+                    _exchangeMap[symbol] = sym;
+                    return {
+                        price: parseFloat(q.close),
+                        previousClose: q.previous_close ? parseFloat(q.previous_close) : null,
+                        change: q.change ? parseFloat(q.change) : null,
+                        changePercent: q.percent_change ? parseFloat(q.percent_change) : null,
+                        currency: q.currency || 'USD',
+                        name: q.name || q.symbol,
+                    };
+                }
+            } catch (err) {
+                if (err.message && err.message.indexOf('Invalid API key') !== -1) throw err;
+                // Otherwise try next exchange
+            }
+        }
+        return null;
+    }
+
+    /**
      * Fetch quotes from Twelve Data API.
+     * Handles ambiguous symbols by trying US exchanges as fallback.
      * @param {string[]} symbols
      * @returns {Promise<Object>}
      */
     async function _fetchFromTwelveData(symbols) {
         var out = {};
         var promises = symbols.map(function (symbol) {
-            var url = API_BASE + '/quote?symbol=' + encodeURIComponent(symbol) + '&apikey=' + encodeURIComponent(_apiKey);
-            return fetch(url)
-                .then(function (resp) {
-                    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-                    return resp.json();
-                })
-                .then(function (q) {
-                    if (q.code && q.code === 401) throw new Error(q.message || 'Invalid API key');
-                    if (q.code && q.code === 404) return;
-                    if (q.symbol && q.close) {
-                        out[q.symbol.toUpperCase()] = {
-                            price: parseFloat(q.close),
-                            previousClose: q.previous_close ? parseFloat(q.previous_close) : null,
-                            change: q.change ? parseFloat(q.change) : null,
-                            changePercent: q.percent_change ? parseFloat(q.percent_change) : null,
-                            currency: q.currency || 'USD',
-                            name: q.name || q.symbol,
-                        };
-                    }
+            return _fetchQuoteWithFallback(symbol)
+                .then(function (result) {
+                    if (result) out[symbol] = result;
                 })
                 .catch(function (err) {
                     console.warn('Failed to fetch ' + symbol + ':', err.message);
@@ -254,6 +299,9 @@ const MarketData = (function () {
         }
         for (k in _historicalCache) {
             if (_historicalCache.hasOwnProperty(k)) delete _historicalCache[k];
+        }
+        for (k in _exchangeMap) {
+            if (_exchangeMap.hasOwnProperty(k)) delete _exchangeMap[k];
         }
     }
 
