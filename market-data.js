@@ -16,7 +16,7 @@ const MarketData = (function () {
 
     const _cache = {};
     let _cacheTTL = 5 * 60 * 1000; // 5 minutes
-    let _corsProxy = '';
+    let _corsProxy = 'https://corsproxy.io/?';
 
     /**
      * Configure the service.
