@@ -410,6 +410,20 @@
             </form>
         </div>
 
+        <!-- Market Data API Key -->
+        <div class="card">
+            <h2>Market Data API Key</h2>
+            <p style="color: #a0a0a0; font-size: 0.9rem; margin-bottom: 12px;">
+                Get a free key at <a href="https://twelvedata.com/pricing" target="_blank" style="color: #00d4ff;">twelvedata.com</a> (takes 10 seconds, 800 requests/day).
+            </p>
+            <div class="form-row">
+                <div class="form-group">
+                    <input type="text" id="apiKeyInput" placeholder="Paste your Twelve Data API key here">
+                </div>
+                <button id="saveApiKey" class="btn btn-primary">Save Key</button>
+            </div>
+        </div>
+
         <!-- Import/Export Section -->
         <div class="card">
             <h2>Import / Export Portfolio</h2>
@@ -515,20 +529,24 @@
         if (typeof MarketData === 'undefined') {
             var MarketData = (function () {
                 'use strict';
+                var STORAGE_KEY = 'marketDataApiKey';
+                var API_BASE = 'https://api.twelvedata.com/quote';
                 var _cache = {};
                 var _cacheTTL = 5 * 60 * 1000;
-                var _corsProxy = 'https://corsproxy.io/?';
+                var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
                 function configure(options) {
                     if (options.cacheTTL !== undefined) _cacheTTL = options.cacheTTL;
-                    if (options.corsProxy !== undefined) _corsProxy = options.corsProxy;
+                    if (options.apiKey !== undefined) { _apiKey = options.apiKey; localStorage.setItem(STORAGE_KEY, _apiKey); }
                 }
+                function getApiKey() { return _apiKey; }
                 async function fetchQuotes(symbols) {
                     if (!symbols || symbols.length === 0) return {};
+                    if (!_apiKey) throw new Error('API key not set');
                     var now = Date.now();
                     var upper = symbols.map(function (s) { return s.toUpperCase(); });
                     var stale = upper.filter(function (s) { return !_cache[s] || (now - _cache[s]._ts > _cacheTTL); });
                     if (stale.length > 0) {
-                        var fetched = await _fetchFromYahoo(stale);
+                        var fetched = await _fetchFromTwelveData(stale);
                         var ts = Date.now();
                         for (var sym in fetched) { _cache[sym] = Object.assign({}, fetched[sym], { _ts: ts }); }
                         for (var i = 0; i < stale.length; i++) {
@@ -543,24 +561,24 @@
                     }
                     return result;
                 }
-                async function _fetchFromYahoo(symbols) {
-                    var url = _corsProxy + 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' + encodeURIComponent(symbols.join(','));
-                    var resp = await fetch(url);
-                    if (!resp.ok) throw new Error('Market data request failed (HTTP ' + resp.status + ')');
-                    var json = await resp.json();
-                    var items = (json && json.quoteResponse && json.quoteResponse.result) || [];
+                async function _fetchFromTwelveData(symbols) {
                     var out = {};
-                    for (var i = 0; i < items.length; i++) {
-                        var q = items[i];
-                        out[q.symbol] = {
-                            price: q.regularMarketPrice != null ? q.regularMarketPrice : null,
-                            previousClose: q.regularMarketPreviousClose != null ? q.regularMarketPreviousClose : null,
-                            change: q.regularMarketChange != null ? q.regularMarketChange : null,
-                            changePercent: q.regularMarketChangePercent != null ? q.regularMarketChangePercent : null,
-                            currency: q.currency || 'USD',
-                            name: q.shortName || q.longName || q.symbol,
-                        };
-                    }
+                    var promises = symbols.map(function (symbol) {
+                        var url = API_BASE + '?symbol=' + encodeURIComponent(symbol) + '&apikey=' + encodeURIComponent(_apiKey);
+                        return fetch(url).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+                            .then(function (q) {
+                                if (q.code === 401) throw new Error(q.message || 'Invalid API key');
+                                if (q.code === 404) return;
+                                if (q.symbol && q.close) {
+                                    out[q.symbol.toUpperCase()] = {
+                                        price: parseFloat(q.close), previousClose: q.previous_close ? parseFloat(q.previous_close) : null,
+                                        change: q.change ? parseFloat(q.change) : null, changePercent: q.percent_change ? parseFloat(q.percent_change) : null,
+                                        currency: q.currency || 'USD', name: q.name || q.symbol,
+                                    };
+                                }
+                            }).catch(function (err) { console.warn('Failed to fetch ' + symbol + ':', err.message); });
+                    });
+                    await Promise.all(promises);
                     return out;
                 }
                 function getCached(symbol) {
@@ -569,7 +587,7 @@
                     var entry = Object.assign({}, c); delete entry._ts; return entry;
                 }
                 function clearCache() { for (var k in _cache) { if (_cache.hasOwnProperty(k)) delete _cache[k]; } }
-                return { configure: configure, fetchQuotes: fetchQuotes, getCached: getCached, clearCache: clearCache };
+                return { configure: configure, getApiKey: getApiKey, fetchQuotes: fetchQuotes, getCached: getCached, clearCache: clearCache };
             })();
         }
     </script>
@@ -708,8 +726,10 @@
                     'Updated ' + now.toLocaleTimeString();
             } catch (err) {
                 marketDataLoaded = true;
-                errorEl.textContent = 'Could not fetch market data: ' + err.message +
-                    '. Prices shown as N/A. If blocked by CORS, configure a proxy via MarketData.configure({ corsProxy: "..." }).';
+                var msg = err.message === 'API key not set'
+                    ? 'Please enter your free Twelve Data API key above to fetch live prices.'
+                    : 'Could not fetch market data: ' + err.message;
+                errorEl.textContent = msg;
                 errorEl.classList.add('visible');
             } finally {
                 btn.textContent = 'Refresh Prices';
@@ -893,6 +913,17 @@
 
         // Refresh prices button
         document.getElementById('refreshPrices').addEventListener('click', refreshMarketData);
+
+        // API key management
+        var apiKeyInput = document.getElementById('apiKeyInput');
+        apiKeyInput.value = MarketData.getApiKey();
+        document.getElementById('saveApiKey').addEventListener('click', function() {
+            var key = apiKeyInput.value.trim();
+            if (!key) { alert('Please enter an API key.'); return; }
+            MarketData.configure({ apiKey: key });
+            MarketData.clearCache();
+            refreshMarketData();
+        });
 
         // Initialize
         loadPortfolio();

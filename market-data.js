@@ -1,56 +1,67 @@
 /**
  * MarketData - Stock market data retrieval service.
  *
- * Fetches current stock prices from Yahoo Finance API and caches results.
- * Designed as a standalone module to be used alongside the portfolio app.
+ * Fetches current stock prices from Twelve Data API (free, CORS-friendly).
+ * Caches results to minimize API calls.
+ *
+ * Setup:
+ *   1. Get a free API key at https://twelvedata.com/pricing (takes 10 seconds)
+ *   2. Enter the key in the app's API Key field, or call:
+ *      MarketData.configure({ apiKey: 'YOUR_KEY' });
  *
  * Usage:
  *   const quotes = await MarketData.fetchQuotes(['AAPL', 'MSFT']);
- *   console.log(quotes.AAPL.price); // 185.50
- *
- * Configuration:
- *   MarketData.configure({ corsProxy: 'https://corsproxy.io/?' });
+ *   console.log(quotes.AAPL.price); // 276.21
  */
 const MarketData = (function () {
     'use strict';
 
-    const _cache = {};
-    let _cacheTTL = 5 * 60 * 1000; // 5 minutes
-    let _corsProxy = 'https://corsproxy.io/?';
+    var STORAGE_KEY = 'marketDataApiKey';
+    var API_BASE = 'https://api.twelvedata.com/quote';
+    var _cache = {};
+    var _cacheTTL = 5 * 60 * 1000; // 5 minutes
+    var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
 
     /**
      * Configure the service.
      * @param {Object} options
+     * @param {string} [options.apiKey] - Twelve Data API key (persisted to localStorage)
      * @param {number} [options.cacheTTL] - Cache duration in ms (default 5 min)
-     * @param {string} [options.corsProxy] - CORS proxy URL prefix to prepend to API requests
      */
     function configure(options) {
         if (options.cacheTTL !== undefined) _cacheTTL = options.cacheTTL;
-        if (options.corsProxy !== undefined) _corsProxy = options.corsProxy;
+        if (options.apiKey !== undefined) {
+            _apiKey = options.apiKey;
+            localStorage.setItem(STORAGE_KEY, _apiKey);
+        }
+    }
+
+    /** @returns {string} The current API key */
+    function getApiKey() {
+        return _apiKey;
     }
 
     /**
      * Fetch current quotes for the given stock symbols.
-     * Returns a map of symbol -> quote data. Symbols without data will have null.
      * @param {string[]} symbols
      * @returns {Promise<Object.<string, QuoteData|null>>}
      */
     async function fetchQuotes(symbols) {
         if (!symbols || symbols.length === 0) return {};
+        if (!_apiKey) throw new Error('API key not set');
 
-        const now = Date.now();
-        const upper = symbols.map(function (s) { return s.toUpperCase(); });
+        var now = Date.now();
+        var upper = symbols.map(function (s) { return s.toUpperCase(); });
         var stale = upper.filter(function (s) {
             return !_cache[s] || (now - _cache[s]._ts > _cacheTTL);
         });
 
         if (stale.length > 0) {
-            var fetched = await _fetchFromYahoo(stale);
+            var fetched = await _fetchFromTwelveData(stale);
             var ts = Date.now();
             for (var sym in fetched) {
                 _cache[sym] = Object.assign({}, fetched[sym], { _ts: ts });
             }
-            // Mark symbols that weren't found
             for (var i = 0; i < stale.length; i++) {
                 if (!fetched[stale[i]] && !_cache[stale[i]]) {
                     _cache[stale[i]] = { price: null, _ts: ts };
@@ -73,36 +84,40 @@ const MarketData = (function () {
     }
 
     /**
-     * Fetch quotes from Yahoo Finance v7 API.
+     * Fetch quotes from Twelve Data API.
+     * Fetches each symbol individually to stay within free-tier limits.
      * @param {string[]} symbols
      * @returns {Promise<Object>}
      */
-    async function _fetchFromYahoo(symbols) {
-        var url = _corsProxy +
-            'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' +
-            encodeURIComponent(symbols.join(','));
-
-        var resp = await fetch(url);
-        if (!resp.ok) {
-            throw new Error('Market data request failed (HTTP ' + resp.status + ')');
-        }
-
-        var json = await resp.json();
-        var items = (json && json.quoteResponse && json.quoteResponse.result) || [];
+    async function _fetchFromTwelveData(symbols) {
         var out = {};
+        var promises = symbols.map(function (symbol) {
+            var url = API_BASE + '?symbol=' + encodeURIComponent(symbol) + '&apikey=' + encodeURIComponent(_apiKey);
+            return fetch(url)
+                .then(function (resp) {
+                    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                    return resp.json();
+                })
+                .then(function (q) {
+                    if (q.code && q.code === 401) throw new Error(q.message || 'Invalid API key');
+                    if (q.code && q.code === 404) return; // symbol not found
+                    if (q.symbol && q.close) {
+                        out[q.symbol.toUpperCase()] = {
+                            price: parseFloat(q.close),
+                            previousClose: q.previous_close ? parseFloat(q.previous_close) : null,
+                            change: q.change ? parseFloat(q.change) : null,
+                            changePercent: q.percent_change ? parseFloat(q.percent_change) : null,
+                            currency: q.currency || 'USD',
+                            name: q.name || q.symbol,
+                        };
+                    }
+                })
+                .catch(function (err) {
+                    console.warn('Failed to fetch ' + symbol + ':', err.message);
+                });
+        });
 
-        for (var i = 0; i < items.length; i++) {
-            var q = items[i];
-            out[q.symbol] = {
-                price: q.regularMarketPrice != null ? q.regularMarketPrice : null,
-                previousClose: q.regularMarketPreviousClose != null ? q.regularMarketPreviousClose : null,
-                change: q.regularMarketChange != null ? q.regularMarketChange : null,
-                changePercent: q.regularMarketChangePercent != null ? q.regularMarketChangePercent : null,
-                currency: q.currency || 'USD',
-                name: q.shortName || q.longName || q.symbol,
-            };
-        }
-
+        await Promise.all(promises);
         return out;
     }
 
@@ -130,6 +145,7 @@ const MarketData = (function () {
 
     return {
         configure: configure,
+        getApiKey: getApiKey,
         fetchQuotes: fetchQuotes,
         getCached: getCached,
         clearCache: clearCache,
