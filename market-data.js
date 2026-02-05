@@ -1,7 +1,7 @@
 /**
  * MarketData - Stock market data retrieval service.
  *
- * Fetches current stock prices from Twelve Data API (free, CORS-friendly).
+ * Fetches current stock prices and historical data from Twelve Data API.
  * Caches results to minimize API calls.
  *
  * Setup:
@@ -12,14 +12,20 @@
  * Usage:
  *   const quotes = await MarketData.fetchQuotes(['AAPL', 'MSFT']);
  *   console.log(quotes.AAPL.price); // 276.21
+ *
+ *   await MarketData.fetchHistorical(['AAPL']);
+ *   console.log(MarketData.getHistorical('AAPL'));
+ *   // { ytdPrice: 273.08, oneYearAgoPrice: 227.63 }
  */
 const MarketData = (function () {
     'use strict';
 
     var STORAGE_KEY = 'marketDataApiKey';
-    var API_BASE = 'https://api.twelvedata.com/quote';
+    var API_BASE = 'https://api.twelvedata.com';
     var _cache = {};
+    var _historicalCache = {};
     var _cacheTTL = 5 * 60 * 1000; // 5 minutes
+    var _historicalCacheTTL = 60 * 60 * 1000; // 1 hour (historical data rarely changes)
     var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
 
     /**
@@ -84,15 +90,110 @@ const MarketData = (function () {
     }
 
     /**
+     * Fetch historical reference prices (YTD start and 1-year ago) for the given symbols.
+     * @param {string[]} symbols
+     * @returns {Promise<Object.<string, HistoricalData|null>>}
+     */
+    async function fetchHistorical(symbols) {
+        if (!symbols || symbols.length === 0) return {};
+        if (!_apiKey) throw new Error('API key not set');
+
+        var now = Date.now();
+        var upper = symbols.map(function (s) { return s.toUpperCase(); });
+        var stale = upper.filter(function (s) {
+            return !_historicalCache[s] || (now - _historicalCache[s]._ts > _historicalCacheTTL);
+        });
+
+        if (stale.length > 0) {
+            var today = new Date();
+            var year = today.getFullYear();
+
+            // Last trading day of previous year: Dec 26-31
+            var ytdStart = (year - 1) + '-12-26';
+            var ytdEnd = (year - 1) + '-12-31';
+
+            // ~365 days ago: look in a 7-day window
+            var oneYearAgo = new Date(today);
+            oneYearAgo.setDate(oneYearAgo.getDate() - 365);
+            var oyaStart = _dateStr(new Date(oneYearAgo.getTime() - 4 * 86400000));
+            var oyaEnd = _dateStr(new Date(oneYearAgo.getTime() + 3 * 86400000));
+
+            var ts = Date.now();
+            var promises = stale.map(function (symbol) {
+                return Promise.all([
+                    _fetchTimeSeries(symbol, ytdStart, ytdEnd),
+                    _fetchTimeSeries(symbol, oyaStart, oyaEnd)
+                ]).then(function (results) {
+                    var ytdPrice = results[0];
+                    var oyaPrice = results[1];
+                    _historicalCache[symbol] = {
+                        ytdPrice: ytdPrice,
+                        oneYearAgoPrice: oyaPrice,
+                        _ts: ts,
+                    };
+                }).catch(function (err) {
+                    console.warn('Failed to fetch historical for ' + symbol + ':', err.message);
+                });
+            });
+
+            await Promise.all(promises);
+        }
+
+        var result = {};
+        for (var j = 0; j < upper.length; j++) {
+            var s = upper[j];
+            if (_historicalCache[s]) {
+                result[s] = {
+                    ytdPrice: _historicalCache[s].ytdPrice,
+                    oneYearAgoPrice: _historicalCache[s].oneYearAgoPrice,
+                };
+            } else {
+                result[s] = null;
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Fetch the closing price from a date range using time_series endpoint.
+     * Returns the most recent closing price in the range, or null.
+     * @param {string} symbol
+     * @param {string} startDate - YYYY-MM-DD
+     * @param {string} endDate - YYYY-MM-DD
+     * @returns {Promise<number|null>}
+     */
+    async function _fetchTimeSeries(symbol, startDate, endDate) {
+        var url = API_BASE + '/time_series?symbol=' + encodeURIComponent(symbol) +
+            '&interval=1day&start_date=' + startDate + '&end_date=' + endDate +
+            '&outputsize=1&apikey=' + encodeURIComponent(_apiKey);
+
+        var resp = await fetch(url);
+        if (!resp.ok) return null;
+
+        var json = await resp.json();
+        if (json.code) return null; // API error
+        if (json.values && json.values.length > 0) {
+            return parseFloat(json.values[0].close);
+        }
+        return null;
+    }
+
+    /** Format a Date as YYYY-MM-DD */
+    function _dateStr(d) {
+        var m = d.getMonth() + 1;
+        var day = d.getDate();
+        return d.getFullYear() + '-' + (m < 10 ? '0' : '') + m + '-' + (day < 10 ? '0' : '') + day;
+    }
+
+    /**
      * Fetch quotes from Twelve Data API.
-     * Fetches each symbol individually to stay within free-tier limits.
      * @param {string[]} symbols
      * @returns {Promise<Object>}
      */
     async function _fetchFromTwelveData(symbols) {
         var out = {};
         var promises = symbols.map(function (symbol) {
-            var url = API_BASE + '?symbol=' + encodeURIComponent(symbol) + '&apikey=' + encodeURIComponent(_apiKey);
+            var url = API_BASE + '/quote?symbol=' + encodeURIComponent(symbol) + '&apikey=' + encodeURIComponent(_apiKey);
             return fetch(url)
                 .then(function (resp) {
                     if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -100,7 +201,7 @@ const MarketData = (function () {
                 })
                 .then(function (q) {
                     if (q.code && q.code === 401) throw new Error(q.message || 'Invalid API key');
-                    if (q.code && q.code === 404) return; // symbol not found
+                    if (q.code && q.code === 404) return;
                     if (q.symbol && q.close) {
                         out[q.symbol.toUpperCase()] = {
                             price: parseFloat(q.close),
@@ -134,12 +235,25 @@ const MarketData = (function () {
         return entry;
     }
 
-    /** Clear all cached quotes. */
+    /**
+     * Get cached historical data (YTD start price and 1Y ago price).
+     * @param {string} symbol
+     * @returns {{ ytdPrice: number|null, oneYearAgoPrice: number|null }|null}
+     */
+    function getHistorical(symbol) {
+        var c = _historicalCache[symbol.toUpperCase()];
+        if (!c) return null;
+        return { ytdPrice: c.ytdPrice, oneYearAgoPrice: c.oneYearAgoPrice };
+    }
+
+    /** Clear all cached data. */
     function clearCache() {
-        for (var k in _cache) {
-            if (_cache.hasOwnProperty(k)) {
-                delete _cache[k];
-            }
+        var k;
+        for (k in _cache) {
+            if (_cache.hasOwnProperty(k)) delete _cache[k];
+        }
+        for (k in _historicalCache) {
+            if (_historicalCache.hasOwnProperty(k)) delete _historicalCache[k];
         }
     }
 
@@ -147,7 +261,9 @@ const MarketData = (function () {
         configure: configure,
         getApiKey: getApiKey,
         fetchQuotes: fetchQuotes,
+        fetchHistorical: fetchHistorical,
         getCached: getCached,
+        getHistorical: getHistorical,
         clearCache: clearCache,
     };
 })();

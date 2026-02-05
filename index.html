@@ -458,6 +458,8 @@
                             <th>Current Price</th>
                             <th>Market Value</th>
                             <th>Gain/Loss</th>
+                            <th>YTD</th>
+                            <th>1Y</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -492,6 +494,14 @@
                 <div class="summary-item">
                     <div class="label">Total Gain/Loss</div>
                     <div class="value" id="totalGainLoss">--</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">YTD Gain/Loss</div>
+                    <div class="value" id="totalYtd">--</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">1Y Gain/Loss</div>
+                    <div class="value" id="totalOneYear">--</div>
                 </div>
             </div>
         </div>
@@ -530,64 +540,73 @@
             var MarketData = (function () {
                 'use strict';
                 var STORAGE_KEY = 'marketDataApiKey';
-                var API_BASE = 'https://api.twelvedata.com/quote';
-                var _cache = {};
-                var _cacheTTL = 5 * 60 * 1000;
+                var API_BASE = 'https://api.twelvedata.com';
+                var _cache = {}, _histCache = {};
+                var _cacheTTL = 5 * 60 * 1000, _histTTL = 60 * 60 * 1000;
                 var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
                 function configure(options) {
                     if (options.cacheTTL !== undefined) _cacheTTL = options.cacheTTL;
                     if (options.apiKey !== undefined) { _apiKey = options.apiKey; localStorage.setItem(STORAGE_KEY, _apiKey); }
                 }
                 function getApiKey() { return _apiKey; }
+                function _dateStr(d) { var m=d.getMonth()+1, day=d.getDate(); return d.getFullYear()+'-'+(m<10?'0':'')+m+'-'+(day<10?'0':'')+day; }
+                async function _fetchTS(symbol, start, end) {
+                    var url = API_BASE+'/time_series?symbol='+encodeURIComponent(symbol)+'&interval=1day&start_date='+start+'&end_date='+end+'&outputsize=1&apikey='+encodeURIComponent(_apiKey);
+                    var r = await fetch(url); if (!r.ok) return null; var j = await r.json();
+                    if (j.code) return null;
+                    return (j.values && j.values.length > 0) ? parseFloat(j.values[0].close) : null;
+                }
                 async function fetchQuotes(symbols) {
                     if (!symbols || symbols.length === 0) return {};
                     if (!_apiKey) throw new Error('API key not set');
-                    var now = Date.now();
-                    var upper = symbols.map(function (s) { return s.toUpperCase(); });
-                    var stale = upper.filter(function (s) { return !_cache[s] || (now - _cache[s]._ts > _cacheTTL); });
+                    var now = Date.now(), upper = symbols.map(function(s){return s.toUpperCase();});
+                    var stale = upper.filter(function(s){return !_cache[s]||(now-_cache[s]._ts>_cacheTTL);});
                     if (stale.length > 0) {
-                        var fetched = await _fetchFromTwelveData(stale);
-                        var ts = Date.now();
-                        for (var sym in fetched) { _cache[sym] = Object.assign({}, fetched[sym], { _ts: ts }); }
-                        for (var i = 0; i < stale.length; i++) {
-                            if (!fetched[stale[i]] && !_cache[stale[i]]) { _cache[stale[i]] = { price: null, _ts: ts }; }
-                        }
+                        var fetched = await _fetchFromTwelveData(stale); var ts = Date.now();
+                        for (var sym in fetched) { _cache[sym] = Object.assign({}, fetched[sym], {_ts:ts}); }
+                        for (var i=0;i<stale.length;i++) { if(!fetched[stale[i]]&&!_cache[stale[i]]){_cache[stale[i]]={price:null,_ts:ts};} }
                     }
                     var result = {};
-                    for (var j = 0; j < upper.length; j++) {
-                        var s = upper[j];
-                        if (_cache[s]) { var entry = Object.assign({}, _cache[s]); delete entry._ts; result[s] = entry; }
-                        else { result[s] = null; }
+                    for (var j=0;j<upper.length;j++) { var s=upper[j]; if(_cache[s]){var e=Object.assign({},_cache[s]);delete e._ts;result[s]=e;}else{result[s]=null;} }
+                    return result;
+                }
+                async function fetchHistorical(symbols) {
+                    if (!symbols || symbols.length === 0) return {};
+                    if (!_apiKey) throw new Error('API key not set');
+                    var now = Date.now(), upper = symbols.map(function(s){return s.toUpperCase();});
+                    var stale = upper.filter(function(s){return !_histCache[s]||(now-_histCache[s]._ts>_histTTL);});
+                    if (stale.length > 0) {
+                        var today = new Date(), year = today.getFullYear();
+                        var ytdS = (year-1)+'-12-26', ytdE = (year-1)+'-12-31';
+                        var oya = new Date(today); oya.setDate(oya.getDate()-365);
+                        var oyaS = _dateStr(new Date(oya.getTime()-4*86400000)), oyaE = _dateStr(new Date(oya.getTime()+3*86400000));
+                        var ts = Date.now();
+                        await Promise.all(stale.map(function(sym){
+                            return Promise.all([_fetchTS(sym,ytdS,ytdE),_fetchTS(sym,oyaS,oyaE)]).then(function(r){
+                                _histCache[sym]={ytdPrice:r[0],oneYearAgoPrice:r[1],_ts:ts};
+                            }).catch(function(e){console.warn('Historical fetch failed for '+sym+':',e.message);});
+                        }));
                     }
+                    var result = {};
+                    for (var j=0;j<upper.length;j++) { var s=upper[j]; result[s]=_histCache[s]?{ytdPrice:_histCache[s].ytdPrice,oneYearAgoPrice:_histCache[s].oneYearAgoPrice}:null; }
                     return result;
                 }
                 async function _fetchFromTwelveData(symbols) {
                     var out = {};
-                    var promises = symbols.map(function (symbol) {
-                        var url = API_BASE + '?symbol=' + encodeURIComponent(symbol) + '&apikey=' + encodeURIComponent(_apiKey);
-                        return fetch(url).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-                            .then(function (q) {
-                                if (q.code === 401) throw new Error(q.message || 'Invalid API key');
-                                if (q.code === 404) return;
-                                if (q.symbol && q.close) {
-                                    out[q.symbol.toUpperCase()] = {
-                                        price: parseFloat(q.close), previousClose: q.previous_close ? parseFloat(q.previous_close) : null,
-                                        change: q.change ? parseFloat(q.change) : null, changePercent: q.percent_change ? parseFloat(q.percent_change) : null,
-                                        currency: q.currency || 'USD', name: q.name || q.symbol,
-                                    };
-                                }
-                            }).catch(function (err) { console.warn('Failed to fetch ' + symbol + ':', err.message); });
-                    });
-                    await Promise.all(promises);
+                    await Promise.all(symbols.map(function(symbol) {
+                        var url = API_BASE+'/quote?symbol='+encodeURIComponent(symbol)+'&apikey='+encodeURIComponent(_apiKey);
+                        return fetch(url).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+                            .then(function(q){
+                                if(q.code===401)throw new Error(q.message||'Invalid API key');if(q.code===404)return;
+                                if(q.symbol&&q.close){out[q.symbol.toUpperCase()]={price:parseFloat(q.close),previousClose:q.previous_close?parseFloat(q.previous_close):null,change:q.change?parseFloat(q.change):null,changePercent:q.percent_change?parseFloat(q.percent_change):null,currency:q.currency||'USD',name:q.name||q.symbol};}
+                            }).catch(function(err){console.warn('Failed to fetch '+symbol+':',err.message);});
+                    }));
                     return out;
                 }
-                function getCached(symbol) {
-                    var c = _cache[symbol.toUpperCase()];
-                    if (!c) return null;
-                    var entry = Object.assign({}, c); delete entry._ts; return entry;
-                }
-                function clearCache() { for (var k in _cache) { if (_cache.hasOwnProperty(k)) delete _cache[k]; } }
-                return { configure: configure, getApiKey: getApiKey, fetchQuotes: fetchQuotes, getCached: getCached, clearCache: clearCache };
+                function getCached(symbol) { var c=_cache[symbol.toUpperCase()]; if(!c)return null; var e=Object.assign({},c);delete e._ts;return e; }
+                function getHistorical(symbol) { var c=_histCache[symbol.toUpperCase()]; if(!c)return null; return {ytdPrice:c.ytdPrice,oneYearAgoPrice:c.oneYearAgoPrice}; }
+                function clearCache() { var k; for(k in _cache){if(_cache.hasOwnProperty(k))delete _cache[k];} for(k in _histCache){if(_histCache.hasOwnProperty(k))delete _histCache[k];} }
+                return { configure:configure, getApiKey:getApiKey, fetchQuotes:fetchQuotes, fetchHistorical:fetchHistorical, getCached:getCached, getHistorical:getHistorical, clearCache:clearCache };
             })();
         }
     </script>
@@ -631,9 +650,10 @@
             tbody.innerHTML = portfolio.map((stock, index) => {
                 const costBasis = stock.amount * stock.avgPrice;
                 const quote = MarketData.getCached(stock.name);
+                const hist = MarketData.getHistorical ? MarketData.getHistorical(stock.name) : null;
                 const hasPrice = quote && quote.price != null;
 
-                let currentPriceHtml, marketValueHtml, gainLossHtml;
+                let currentPriceHtml, marketValueHtml, gainLossHtml, ytdHtml, oneYearHtml;
 
                 if (hasPrice) {
                     const currentPrice = quote.price;
@@ -646,10 +666,34 @@
                     currentPriceHtml = `$${formatNumber(currentPrice, 2)}`;
                     marketValueHtml = `<span class="${cls}">$${formatNumber(marketValue, 2)}</span>`;
                     gainLossHtml = `<span class="gain-loss ${cls}">${sign}$${formatNumber(gainLoss, 2)} (${sign}${gainLossPct.toFixed(1)}%)</span>`;
+
+                    // YTD gain per stock
+                    if (hist && hist.ytdPrice != null) {
+                        const ytdGain = (currentPrice - hist.ytdPrice) * stock.amount;
+                        const ytdPct = hist.ytdPrice > 0 ? ((currentPrice - hist.ytdPrice) / hist.ytdPrice) * 100 : 0;
+                        const ytdCls = ytdGain > 0 ? 'price-up' : ytdGain < 0 ? 'price-down' : 'price-neutral';
+                        const ytdSign = ytdGain >= 0 ? '+' : '';
+                        ytdHtml = `<span class="gain-loss ${ytdCls}">${ytdSign}${ytdPct.toFixed(1)}%</span>`;
+                    } else {
+                        ytdHtml = '<span class="price-neutral">--</span>';
+                    }
+
+                    // 1Y gain per stock
+                    if (hist && hist.oneYearAgoPrice != null) {
+                        const oyGain = (currentPrice - hist.oneYearAgoPrice) * stock.amount;
+                        const oyPct = hist.oneYearAgoPrice > 0 ? ((currentPrice - hist.oneYearAgoPrice) / hist.oneYearAgoPrice) * 100 : 0;
+                        const oyCls = oyGain > 0 ? 'price-up' : oyGain < 0 ? 'price-down' : 'price-neutral';
+                        const oySign = oyGain >= 0 ? '+' : '';
+                        oneYearHtml = `<span class="gain-loss ${oyCls}">${oySign}${oyPct.toFixed(1)}%</span>`;
+                    } else {
+                        oneYearHtml = '<span class="price-neutral">--</span>';
+                    }
                 } else {
                     currentPriceHtml = marketDataLoaded ? '<span class="price-neutral">N/A</span>' : '<span class="price-pending">--</span>';
                     marketValueHtml = `$${formatNumber(costBasis, 2)}`;
                     gainLossHtml = '<span class="price-neutral">--</span>';
+                    ytdHtml = '<span class="price-neutral">--</span>';
+                    oneYearHtml = '<span class="price-neutral">--</span>';
                 }
 
                 return `
@@ -660,6 +704,8 @@
                         <td>${currentPriceHtml}</td>
                         <td class="total-value">${marketValueHtml}</td>
                         <td>${gainLossHtml}</td>
+                        <td>${ytdHtml}</td>
+                        <td>${oneYearHtml}</td>
                         <td class="actions-cell">
                             <button class="btn btn-secondary btn-small" onclick="editStock(${index})">Edit</button>
                             <button class="btn btn-danger btn-small" onclick="deleteStock(${index})">Delete</button>
@@ -679,11 +725,28 @@
 
             let marketValue = 0;
             let hasAnyMarketData = false;
+            let ytdTotal = 0, ytdBasis = 0, hasYtd = false;
+            let oyTotal = 0, oyBasis = 0, hasOy = false;
+
             for (const stock of portfolio) {
                 const quote = MarketData.getCached(stock.name);
+                const hist = MarketData.getHistorical ? MarketData.getHistorical(stock.name) : null;
+
                 if (quote && quote.price != null) {
-                    marketValue += stock.amount * quote.price;
+                    const curVal = stock.amount * quote.price;
+                    marketValue += curVal;
                     hasAnyMarketData = true;
+
+                    if (hist && hist.ytdPrice != null) {
+                        ytdTotal += curVal;
+                        ytdBasis += stock.amount * hist.ytdPrice;
+                        hasYtd = true;
+                    }
+                    if (hist && hist.oneYearAgoPrice != null) {
+                        oyTotal += curVal;
+                        oyBasis += stock.amount * hist.oneYearAgoPrice;
+                        hasOy = true;
+                    }
                 } else {
                     marketValue += stock.amount * stock.avgPrice;
                 }
@@ -704,6 +767,30 @@
             } else {
                 document.getElementById('totalGainLoss').textContent = '--';
             }
+
+            // YTD total
+            if (hasYtd) {
+                const ytdGain = ytdTotal - ytdBasis;
+                const ytdPct = ytdBasis > 0 ? (ytdGain / ytdBasis) * 100 : 0;
+                const s = ytdGain >= 0 ? '+' : '';
+                const c = ytdGain > 0 ? 'price-up' : ytdGain < 0 ? 'price-down' : 'price-neutral';
+                document.getElementById('totalYtd').innerHTML =
+                    '<span class="' + c + '">' + s + '$' + formatNumber(ytdGain, 2) + ' (' + s + ytdPct.toFixed(1) + '%)</span>';
+            } else {
+                document.getElementById('totalYtd').textContent = '--';
+            }
+
+            // 1Y total
+            if (hasOy) {
+                const oyGain = oyTotal - oyBasis;
+                const oyPct = oyBasis > 0 ? (oyGain / oyBasis) * 100 : 0;
+                const s = oyGain >= 0 ? '+' : '';
+                const c = oyGain > 0 ? 'price-up' : oyGain < 0 ? 'price-down' : 'price-neutral';
+                document.getElementById('totalOneYear').innerHTML =
+                    '<span class="' + c + '">' + s + '$' + formatNumber(oyGain, 2) + ' (' + s + oyPct.toFixed(1) + '%)</span>';
+            } else {
+                document.getElementById('totalOneYear').textContent = '--';
+            }
         }
 
         // Refresh market data for all stocks in the portfolio
@@ -720,6 +807,9 @@
 
             try {
                 await MarketData.fetchQuotes(symbols);
+                if (MarketData.fetchHistorical) {
+                    await MarketData.fetchHistorical(symbols);
+                }
                 marketDataLoaded = true;
                 const now = new Date();
                 document.getElementById('lastUpdated').textContent =
