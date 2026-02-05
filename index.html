@@ -20,7 +20,7 @@
         }
 
         .container {
-            max-width: 1000px;
+            max-width: 1200px;
             margin: 0 auto;
         }
 
@@ -41,8 +41,16 @@
             border: 1px solid rgba(255, 255, 255, 0.1);
         }
 
-        .card h2 {
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
             margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .card h2 {
             color: #00d4ff;
             font-size: 1.3rem;
         }
@@ -97,12 +105,18 @@
             font-weight: 600;
         }
 
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
         .btn-primary {
             background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%);
             color: #1a1a2e;
         }
 
-        .btn-primary:hover {
+        .btn-primary:hover:not(:disabled) {
             transform: translateY(-2px);
             box-shadow: 0 4px 15px rgba(0, 212, 255, 0.4);
         }
@@ -113,7 +127,7 @@
             border: 1px solid rgba(255, 255, 255, 0.2);
         }
 
-        .btn-secondary:hover {
+        .btn-secondary:hover:not(:disabled) {
             background: rgba(255, 255, 255, 0.2);
         }
 
@@ -122,7 +136,7 @@
             color: #fff;
         }
 
-        .btn-danger:hover {
+        .btn-danger:hover:not(:disabled) {
             transform: translateY(-2px);
             box-shadow: 0 4px 15px rgba(255, 71, 87, 0.4);
         }
@@ -132,9 +146,19 @@
             color: #fff;
         }
 
-        .btn-success:hover {
+        .btn-success:hover:not(:disabled) {
             transform: translateY(-2px);
             box-shadow: 0 4px 15px rgba(46, 213, 115, 0.4);
+        }
+
+        .btn-warning {
+            background: linear-gradient(135deg, #ffa502 0%, #cc8400 100%);
+            color: #1a1a2e;
+        }
+
+        .btn-warning:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(255, 165, 2, 0.4);
         }
 
         .btn-small {
@@ -148,14 +172,19 @@
             flex-wrap: wrap;
         }
 
+        .table-container {
+            overflow-x: auto;
+        }
+
         table {
             width: 100%;
             border-collapse: collapse;
             margin-top: 16px;
+            min-width: 800px;
         }
 
         th, td {
-            padding: 16px;
+            padding: 14px 12px;
             text-align: left;
             border-bottom: 1px solid rgba(255, 255, 255, 0.1);
         }
@@ -164,8 +193,9 @@
             color: #00d4ff;
             font-weight: 600;
             text-transform: uppercase;
-            font-size: 0.85rem;
+            font-size: 0.75rem;
             letter-spacing: 1px;
+            white-space: nowrap;
         }
 
         tr:hover {
@@ -177,19 +207,47 @@
             color: #fff;
         }
 
-        .total-value {
+        .price-up {
+            color: #2ed573;
+        }
+
+        .price-down {
+            color: #ff4757;
+        }
+
+        .price-neutral {
+            color: #a0a0a0;
+        }
+
+        .gain {
             color: #2ed573;
             font-weight: 600;
+        }
+
+        .loss {
+            color: #ff4757;
+            font-weight: 600;
+        }
+
+        .loading {
+            color: #ffa502;
+            font-style: italic;
+        }
+
+        .error {
+            color: #ff4757;
+            font-size: 0.85rem;
         }
 
         .actions-cell {
             display: flex;
             gap: 8px;
+            white-space: nowrap;
         }
 
         .summary {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
             gap: 16px;
             margin-top: 20px;
         }
@@ -203,14 +261,22 @@
 
         .summary-item .label {
             color: #a0a0a0;
-            font-size: 0.9rem;
+            font-size: 0.85rem;
             margin-bottom: 8px;
         }
 
         .summary-item .value {
-            font-size: 1.8rem;
+            font-size: 1.5rem;
             font-weight: 700;
             color: #00d4ff;
+        }
+
+        .summary-item .value.gain {
+            color: #2ed573;
+        }
+
+        .summary-item .value.loss {
+            color: #ff4757;
         }
 
         .empty-state {
@@ -277,7 +343,96 @@
             justify-content: flex-end;
         }
 
-        @media (max-width: 600px) {
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 16px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            margin-bottom: 16px;
+            font-size: 0.9rem;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .status-bar .last-update {
+            color: #a0a0a0;
+        }
+
+        .status-bar .auto-refresh {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-bar .auto-refresh label {
+            color: #a0a0a0;
+            cursor: pointer;
+        }
+
+        .toggle-switch {
+            position: relative;
+            width: 48px;
+            height: 24px;
+        }
+
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 255, 255, 0.1);
+            transition: 0.3s;
+            border-radius: 24px;
+        }
+
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: #a0a0a0;
+            transition: 0.3s;
+            border-radius: 50%;
+        }
+
+        .toggle-switch input:checked + .toggle-slider {
+            background-color: #00d4ff;
+        }
+
+        .toggle-switch input:checked + .toggle-slider:before {
+            transform: translateX(24px);
+            background-color: #1a1a2e;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: #00d4ff;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 768px) {
             .form-row {
                 flex-direction: column;
             }
@@ -287,15 +442,19 @@
             }
 
             table {
-                font-size: 0.9rem;
+                font-size: 0.85rem;
             }
 
             th, td {
-                padding: 12px 8px;
+                padding: 10px 8px;
             }
 
             .actions-cell {
                 flex-direction: column;
+            }
+
+            .summary-item .value {
+                font-size: 1.3rem;
             }
         }
     </style>
@@ -310,7 +469,7 @@
             <form id="addStockForm">
                 <div class="form-row">
                     <div class="form-group">
-                        <label for="stockName">Stock Name / Symbol</label>
+                        <label for="stockName">Stock Symbol</label>
                         <input type="text" id="stockName" placeholder="e.g., AAPL" required>
                     </div>
                     <div class="form-group">
@@ -341,21 +500,45 @@
 
         <!-- Portfolio Table -->
         <div class="card">
-            <h2>Your Portfolio</h2>
+            <div class="card-header">
+                <h2>Your Portfolio</h2>
+                <button id="refreshBtn" class="btn btn-warning">
+                    <span id="refreshText">Refresh Prices</span>
+                </button>
+            </div>
+
+            <!-- Status Bar -->
+            <div class="status-bar" id="statusBar" style="display: none;">
+                <span class="last-update" id="lastUpdate">Last updated: Never</span>
+                <div class="auto-refresh">
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="autoRefresh">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <label for="autoRefresh">Auto-refresh (60s)</label>
+                </div>
+            </div>
+
             <div id="portfolioContainer">
-                <table id="portfolioTable">
-                    <thead>
-                        <tr>
-                            <th>Stock</th>
-                            <th>Shares</th>
-                            <th>Avg. Price</th>
-                            <th>Total Value</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="portfolioBody">
-                    </tbody>
-                </table>
+                <div class="table-container">
+                    <table id="portfolioTable">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Shares</th>
+                                <th>Avg. Cost</th>
+                                <th>Current Price</th>
+                                <th>Day Change</th>
+                                <th>Market Value</th>
+                                <th>Cost Basis</th>
+                                <th>Gain/Loss</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="portfolioBody">
+                        </tbody>
+                    </table>
+                </div>
                 <div id="emptyState" class="empty-state">
                     <p>No stocks in your portfolio yet.</p>
                     <p>Add your first stock above!</p>
@@ -373,8 +556,20 @@
                     <div class="value" id="totalShares">0</div>
                 </div>
                 <div class="summary-item">
-                    <div class="label">Portfolio Value</div>
+                    <div class="label">Cost Basis</div>
+                    <div class="value" id="totalCost">$0.00</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">Market Value</div>
                     <div class="value" id="totalValue">$0.00</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">Total Gain/Loss</div>
+                    <div class="value" id="totalGainLoss">$0.00</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">Return %</div>
+                    <div class="value" id="totalReturn">0.00%</div>
                 </div>
             </div>
         </div>
@@ -387,7 +582,7 @@
             <form id="editStockForm">
                 <input type="hidden" id="editIndex">
                 <div class="form-group">
-                    <label for="editStockName">Stock Name / Symbol</label>
+                    <label for="editStockName">Stock Symbol</label>
                     <input type="text" id="editStockName" required>
                 </div>
                 <div class="form-group" style="margin-top: 16px;">
@@ -409,6 +604,12 @@
     <script>
         // Portfolio data management
         let portfolio = [];
+        let stockPrices = {};
+        let isRefreshing = false;
+        let autoRefreshInterval = null;
+
+        // API configuration - using Yahoo Finance via AllOrigins proxy
+        const PROXY_URL = 'https://api.allorigins.win/raw?url=';
 
         // Load portfolio from localStorage
         function loadPortfolio() {
@@ -416,7 +617,14 @@
             if (saved) {
                 portfolio = JSON.parse(saved);
             }
+            const savedPrices = localStorage.getItem('stockPrices');
+            if (savedPrices) {
+                stockPrices = JSON.parse(savedPrices);
+            }
             renderPortfolio();
+            if (portfolio.length > 0) {
+                fetchAllPrices();
+            }
         }
 
         // Save portfolio to localStorage
@@ -424,30 +632,138 @@
             localStorage.setItem('stocksPortfolio', JSON.stringify(portfolio));
         }
 
+        // Save prices to localStorage
+        function savePrices() {
+            localStorage.setItem('stockPrices', JSON.stringify(stockPrices));
+        }
+
+        // Fetch stock price from Yahoo Finance
+        async function fetchStockPrice(symbol) {
+            try {
+                const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`;
+                const response = await fetch(PROXY_URL + encodeURIComponent(url));
+
+                if (!response.ok) throw new Error('Network error');
+
+                const data = await response.json();
+
+                if (data.chart && data.chart.result && data.chart.result[0]) {
+                    const result = data.chart.result[0];
+                    const meta = result.meta;
+                    const currentPrice = meta.regularMarketPrice;
+                    const previousClose = meta.previousClose || meta.chartPreviousClose;
+                    const change = currentPrice - previousClose;
+                    const changePercent = (change / previousClose) * 100;
+
+                    return {
+                        symbol: symbol.toUpperCase(),
+                        price: currentPrice,
+                        previousClose: previousClose,
+                        change: change,
+                        changePercent: changePercent,
+                        lastUpdated: new Date().toISOString()
+                    };
+                }
+                throw new Error('Invalid data');
+            } catch (error) {
+                console.error(`Error fetching ${symbol}:`, error);
+                return null;
+            }
+        }
+
+        // Fetch all stock prices
+        async function fetchAllPrices() {
+            if (portfolio.length === 0 || isRefreshing) return;
+
+            isRefreshing = true;
+            const refreshBtn = document.getElementById('refreshBtn');
+            const refreshText = document.getElementById('refreshText');
+            refreshBtn.disabled = true;
+            refreshText.innerHTML = '<span class="spinner"></span>Refreshing...';
+
+            const symbols = [...new Set(portfolio.map(s => s.name.toUpperCase()))];
+
+            const results = await Promise.all(symbols.map(symbol => fetchStockPrice(symbol)));
+
+            results.forEach(result => {
+                if (result) {
+                    stockPrices[result.symbol] = result;
+                }
+            });
+
+            savePrices();
+            renderPortfolio();
+            updateLastUpdated();
+
+            isRefreshing = false;
+            refreshBtn.disabled = false;
+            refreshText.textContent = 'Refresh Prices';
+        }
+
+        // Update last updated timestamp
+        function updateLastUpdated() {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString();
+            document.getElementById('lastUpdate').textContent = `Last updated: ${timeStr}`;
+        }
+
         // Render portfolio table
         function renderPortfolio() {
             const tbody = document.getElementById('portfolioBody');
             const emptyState = document.getElementById('emptyState');
             const table = document.getElementById('portfolioTable');
+            const statusBar = document.getElementById('statusBar');
 
             if (portfolio.length === 0) {
                 table.style.display = 'none';
                 emptyState.style.display = 'block';
+                statusBar.style.display = 'none';
                 document.getElementById('summarySection').style.display = 'none';
             } else {
                 table.style.display = 'table';
                 emptyState.style.display = 'none';
+                statusBar.style.display = 'flex';
                 document.getElementById('summarySection').style.display = 'grid';
             }
 
             tbody.innerHTML = portfolio.map((stock, index) => {
-                const totalValue = stock.amount * stock.avgPrice;
+                const symbol = stock.name.toUpperCase();
+                const priceData = stockPrices[symbol];
+                const costBasis = stock.amount * stock.avgPrice;
+
+                let currentPrice = '-';
+                let dayChange = '-';
+                let marketValue = '-';
+                let gainLoss = '-';
+                let gainLossClass = '';
+                let dayChangeClass = '';
+
+                if (priceData) {
+                    currentPrice = `$${formatNumber(priceData.price, 2)}`;
+                    const change = priceData.change;
+                    const changePercent = priceData.changePercent;
+                    dayChange = `${change >= 0 ? '+' : ''}$${formatNumber(change, 2)} (${change >= 0 ? '+' : ''}${formatNumber(changePercent, 2)}%)`;
+                    dayChangeClass = change >= 0 ? 'price-up' : 'price-down';
+
+                    const mktValue = stock.amount * priceData.price;
+                    marketValue = `$${formatNumber(mktValue, 2)}`;
+
+                    const gl = mktValue - costBasis;
+                    const glPercent = (gl / costBasis) * 100;
+                    gainLoss = `${gl >= 0 ? '+' : ''}$${formatNumber(gl, 2)} (${gl >= 0 ? '+' : ''}${formatNumber(glPercent, 2)}%)`;
+                    gainLossClass = gl >= 0 ? 'gain' : 'loss';
+                }
+
                 return `
                     <tr>
-                        <td class="stock-name">${escapeHtml(stock.name)}</td>
+                        <td class="stock-name">${escapeHtml(symbol)}</td>
                         <td>${formatNumber(stock.amount)}</td>
                         <td>$${formatNumber(stock.avgPrice, 2)}</td>
-                        <td class="total-value">$${formatNumber(totalValue, 2)}</td>
+                        <td>${currentPrice}</td>
+                        <td class="${dayChangeClass}">${dayChange}</td>
+                        <td>${marketValue}</td>
+                        <td>$${formatNumber(costBasis, 2)}</td>
+                        <td class="${gainLossClass}">${gainLoss}</td>
                         <td class="actions-cell">
                             <button class="btn btn-secondary btn-small" onclick="editStock(${index})">Edit</button>
                             <button class="btn btn-danger btn-small" onclick="deleteStock(${index})">Delete</button>
@@ -463,11 +779,36 @@
         function updateSummary() {
             const totalStocks = portfolio.length;
             const totalShares = portfolio.reduce((sum, stock) => sum + parseFloat(stock.amount), 0);
-            const totalValue = portfolio.reduce((sum, stock) => sum + (stock.amount * stock.avgPrice), 0);
+            const totalCost = portfolio.reduce((sum, stock) => sum + (stock.amount * stock.avgPrice), 0);
+
+            let totalMarketValue = 0;
+            let hasAllPrices = true;
+
+            portfolio.forEach(stock => {
+                const priceData = stockPrices[stock.name.toUpperCase()];
+                if (priceData) {
+                    totalMarketValue += stock.amount * priceData.price;
+                } else {
+                    hasAllPrices = false;
+                    totalMarketValue += stock.amount * stock.avgPrice; // fallback to cost
+                }
+            });
+
+            const totalGainLoss = totalMarketValue - totalCost;
+            const totalReturnPercent = totalCost > 0 ? (totalGainLoss / totalCost) * 100 : 0;
 
             document.getElementById('totalStocks').textContent = totalStocks;
             document.getElementById('totalShares').textContent = formatNumber(totalShares);
-            document.getElementById('totalValue').textContent = '$' + formatNumber(totalValue, 2);
+            document.getElementById('totalCost').textContent = '$' + formatNumber(totalCost, 2);
+            document.getElementById('totalValue').textContent = '$' + formatNumber(totalMarketValue, 2);
+
+            const gainLossEl = document.getElementById('totalGainLoss');
+            gainLossEl.textContent = (totalGainLoss >= 0 ? '+$' : '-$') + formatNumber(Math.abs(totalGainLoss), 2);
+            gainLossEl.className = 'value ' + (totalGainLoss >= 0 ? 'gain' : 'loss');
+
+            const returnEl = document.getElementById('totalReturn');
+            returnEl.textContent = (totalReturnPercent >= 0 ? '+' : '') + formatNumber(totalReturnPercent, 2) + '%';
+            returnEl.className = 'value ' + (totalReturnPercent >= 0 ? 'gain' : 'loss');
         }
 
         // Format number with commas and decimals
@@ -499,6 +840,33 @@
                 renderPortfolio();
                 this.reset();
                 document.getElementById('stockName').focus();
+
+                // Fetch price for the new stock
+                if (!stockPrices[name]) {
+                    fetchStockPrice(name).then(result => {
+                        if (result) {
+                            stockPrices[result.symbol] = result;
+                            savePrices();
+                            renderPortfolio();
+                        }
+                    });
+                }
+            }
+        });
+
+        // Refresh button click
+        document.getElementById('refreshBtn').addEventListener('click', fetchAllPrices);
+
+        // Auto-refresh toggle
+        document.getElementById('autoRefresh').addEventListener('change', function() {
+            if (this.checked) {
+                fetchAllPrices();
+                autoRefreshInterval = setInterval(fetchAllPrices, 60000); // 60 seconds
+            } else {
+                if (autoRefreshInterval) {
+                    clearInterval(autoRefreshInterval);
+                    autoRefreshInterval = null;
+                }
             }
         });
 
@@ -522,8 +890,21 @@
             const avgPrice = parseFloat(document.getElementById('editAvgPrice').value);
 
             if (name && amount > 0 && avgPrice > 0) {
+                const oldName = portfolio[index].name;
                 portfolio[index] = { name, amount, avgPrice };
                 savePortfolio();
+
+                // Fetch new price if symbol changed
+                if (oldName !== name && !stockPrices[name]) {
+                    fetchStockPrice(name).then(result => {
+                        if (result) {
+                            stockPrices[result.symbol] = result;
+                            savePrices();
+                            renderPortfolio();
+                        }
+                    });
+                }
+
                 renderPortfolio();
                 closeModal();
             }
@@ -561,7 +942,8 @@
 
             const exportData = {
                 exportDate: new Date().toISOString(),
-                portfolio: portfolio
+                portfolio: portfolio,
+                lastPrices: stockPrices
             };
 
             const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
@@ -620,6 +1002,7 @@
 
                     savePortfolio();
                     renderPortfolio();
+                    fetchAllPrices(); // Fetch prices for imported stocks
                     alert(`Successfully imported ${validPortfolio.length} stocks!`);
                 } catch (error) {
                     alert('Error importing file: ' + error.message);
@@ -638,7 +1021,9 @@
 
             if (confirm('Are you sure you want to clear all stocks? This cannot be undone!')) {
                 portfolio = [];
+                stockPrices = {};
                 savePortfolio();
+                savePrices();
                 renderPortfolio();
             }
         });
