@@ -9,3 +9,4 @@ A web-based application to track your stock portfolio with real-time price updat
 - Track gains/losses and portfolio performance
 - Export/Import portfolio data as JSON
 - Auto-refresh prices every 60 seconds
+
