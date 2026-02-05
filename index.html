@@ -277,6 +277,84 @@
             justify-content: flex-end;
         }
 
+        .portfolio-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .portfolio-header h2 {
+            margin-bottom: 0;
+        }
+
+        .market-status {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .last-updated {
+            color: #666;
+            font-size: 0.8rem;
+        }
+
+        .table-wrapper {
+            overflow-x: auto;
+        }
+
+        .price-up {
+            color: #2ed573;
+        }
+
+        .price-down {
+            color: #ff4757;
+        }
+
+        .price-neutral {
+            color: #a0a0a0;
+        }
+
+        .price-pending {
+            color: #666;
+            font-style: italic;
+        }
+
+        .gain-loss {
+            white-space: nowrap;
+        }
+
+        .market-error {
+            background: rgba(255, 71, 87, 0.1);
+            border: 1px solid rgba(255, 71, 87, 0.3);
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 16px;
+            color: #ff6b7a;
+            font-size: 0.9rem;
+            display: none;
+        }
+
+        .market-error.visible {
+            display: block;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(0, 212, 255, 0.3);
+            border-top-color: #00d4ff;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            vertical-align: middle;
+            margin-right: 4px;
+        }
+
         @media (max-width: 600px) {
             .form-row {
                 flex-direction: column;
@@ -296,6 +374,12 @@
 
             .actions-cell {
                 flex-direction: column;
+            }
+
+            .portfolio-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 12px;
             }
         }
     </style>
@@ -341,21 +425,32 @@
 
         <!-- Portfolio Table -->
         <div class="card">
-            <h2>Your Portfolio</h2>
+            <div class="portfolio-header">
+                <h2>Your Portfolio</h2>
+                <div class="market-status">
+                    <span id="lastUpdated" class="last-updated"></span>
+                    <button id="refreshPrices" class="btn btn-secondary btn-small">Refresh Prices</button>
+                </div>
+            </div>
+            <div id="marketError" class="market-error"></div>
             <div id="portfolioContainer">
+                <div class="table-wrapper">
                 <table id="portfolioTable">
                     <thead>
                         <tr>
                             <th>Stock</th>
                             <th>Shares</th>
                             <th>Avg. Price</th>
-                            <th>Total Value</th>
+                            <th>Current Price</th>
+                            <th>Market Value</th>
+                            <th>Gain/Loss</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody id="portfolioBody">
                     </tbody>
                 </table>
+                </div>
                 <div id="emptyState" class="empty-state">
                     <p>No stocks in your portfolio yet.</p>
                     <p>Add your first stock above!</p>
@@ -373,8 +468,16 @@
                     <div class="value" id="totalShares">0</div>
                 </div>
                 <div class="summary-item">
-                    <div class="label">Portfolio Value</div>
+                    <div class="label">Cost Basis</div>
+                    <div class="value" id="costBasis">$0.00</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">Market Value</div>
                     <div class="value" id="totalValue">$0.00</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">Total Gain/Loss</div>
+                    <div class="value" id="totalGainLoss">--</div>
                 </div>
             </div>
         </div>
@@ -406,6 +509,7 @@
         </div>
     </div>
 
+    <script src="market-data.js"></script>
     <script>
         // Portfolio data management
         let portfolio = [];
@@ -424,6 +528,9 @@
             localStorage.setItem('stocksPortfolio', JSON.stringify(portfolio));
         }
 
+        // Track whether market data has been loaded
+        let marketDataLoaded = false;
+
         // Render portfolio table
         function renderPortfolio() {
             const tbody = document.getElementById('portfolioBody');
@@ -441,13 +548,37 @@
             }
 
             tbody.innerHTML = portfolio.map((stock, index) => {
-                const totalValue = stock.amount * stock.avgPrice;
+                const costBasis = stock.amount * stock.avgPrice;
+                const quote = MarketData.getCached(stock.name);
+                const hasPrice = quote && quote.price != null;
+
+                let currentPriceHtml, marketValueHtml, gainLossHtml;
+
+                if (hasPrice) {
+                    const currentPrice = quote.price;
+                    const marketValue = stock.amount * currentPrice;
+                    const gainLoss = marketValue - costBasis;
+                    const gainLossPct = costBasis > 0 ? (gainLoss / costBasis) * 100 : 0;
+                    const cls = gainLoss > 0 ? 'price-up' : gainLoss < 0 ? 'price-down' : 'price-neutral';
+                    const sign = gainLoss >= 0 ? '+' : '';
+
+                    currentPriceHtml = `$${formatNumber(currentPrice, 2)}`;
+                    marketValueHtml = `<span class="${cls}">$${formatNumber(marketValue, 2)}</span>`;
+                    gainLossHtml = `<span class="gain-loss ${cls}">${sign}$${formatNumber(gainLoss, 2)} (${sign}${gainLossPct.toFixed(1)}%)</span>`;
+                } else {
+                    currentPriceHtml = marketDataLoaded ? '<span class="price-neutral">N/A</span>' : '<span class="price-pending">--</span>';
+                    marketValueHtml = `$${formatNumber(costBasis, 2)}`;
+                    gainLossHtml = '<span class="price-neutral">--</span>';
+                }
+
                 return `
                     <tr>
                         <td class="stock-name">${escapeHtml(stock.name)}</td>
                         <td>${formatNumber(stock.amount)}</td>
                         <td>$${formatNumber(stock.avgPrice, 2)}</td>
-                        <td class="total-value">$${formatNumber(totalValue, 2)}</td>
+                        <td>${currentPriceHtml}</td>
+                        <td class="total-value">${marketValueHtml}</td>
+                        <td>${gainLossHtml}</td>
                         <td class="actions-cell">
                             <button class="btn btn-secondary btn-small" onclick="editStock(${index})">Edit</button>
                             <button class="btn btn-danger btn-small" onclick="deleteStock(${index})">Delete</button>
@@ -463,11 +594,65 @@
         function updateSummary() {
             const totalStocks = portfolio.length;
             const totalShares = portfolio.reduce((sum, stock) => sum + parseFloat(stock.amount), 0);
-            const totalValue = portfolio.reduce((sum, stock) => sum + (stock.amount * stock.avgPrice), 0);
+            const costBasis = portfolio.reduce((sum, stock) => sum + (stock.amount * stock.avgPrice), 0);
+
+            let marketValue = 0;
+            let hasAnyMarketData = false;
+            for (const stock of portfolio) {
+                const quote = MarketData.getCached(stock.name);
+                if (quote && quote.price != null) {
+                    marketValue += stock.amount * quote.price;
+                    hasAnyMarketData = true;
+                } else {
+                    marketValue += stock.amount * stock.avgPrice;
+                }
+            }
 
             document.getElementById('totalStocks').textContent = totalStocks;
             document.getElementById('totalShares').textContent = formatNumber(totalShares);
-            document.getElementById('totalValue').textContent = '$' + formatNumber(totalValue, 2);
+            document.getElementById('costBasis').textContent = '$' + formatNumber(costBasis, 2);
+            document.getElementById('totalValue').textContent = '$' + formatNumber(marketValue, 2);
+
+            if (hasAnyMarketData) {
+                const totalGainLoss = marketValue - costBasis;
+                const pct = costBasis > 0 ? (totalGainLoss / costBasis) * 100 : 0;
+                const sign = totalGainLoss >= 0 ? '+' : '';
+                const cls = totalGainLoss > 0 ? 'price-up' : totalGainLoss < 0 ? 'price-down' : 'price-neutral';
+                document.getElementById('totalGainLoss').innerHTML =
+                    '<span class="' + cls + '">' + sign + '$' + formatNumber(totalGainLoss, 2) + ' (' + sign + pct.toFixed(1) + '%)</span>';
+            } else {
+                document.getElementById('totalGainLoss').textContent = '--';
+            }
+        }
+
+        // Refresh market data for all stocks in the portfolio
+        async function refreshMarketData() {
+            if (portfolio.length === 0) return;
+
+            const symbols = portfolio.map(s => s.name);
+            const btn = document.getElementById('refreshPrices');
+            const errorEl = document.getElementById('marketError');
+
+            btn.innerHTML = '<span class="loading-spinner"></span>Loading...';
+            btn.disabled = true;
+            errorEl.classList.remove('visible');
+
+            try {
+                await MarketData.fetchQuotes(symbols);
+                marketDataLoaded = true;
+                const now = new Date();
+                document.getElementById('lastUpdated').textContent =
+                    'Updated ' + now.toLocaleTimeString();
+            } catch (err) {
+                marketDataLoaded = true;
+                errorEl.textContent = 'Could not fetch market data: ' + err.message +
+                    '. Prices shown as N/A. If blocked by CORS, configure a proxy via MarketData.configure({ corsProxy: "..." }).';
+                errorEl.classList.add('visible');
+            } finally {
+                btn.textContent = 'Refresh Prices';
+                btn.disabled = false;
+                renderPortfolio();
+            }
         }
 
         // Format number with commas and decimals
@@ -643,8 +828,12 @@
             }
         });
 
+        // Refresh prices button
+        document.getElementById('refreshPrices').addEventListener('click', refreshMarketData);
+
         // Initialize
         loadPortfolio();
+        refreshMarketData();
     </script>
 </body>
 </html>
