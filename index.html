@@ -543,7 +543,7 @@
                 var API_BASE = 'https://api.twelvedata.com';
                 var _cache = {}, _histCache = {}, _exMap = {};
                 var _cacheTTL = 5 * 60 * 1000, _histTTL = 60 * 60 * 1000;
-                var US_EX = ['NYSE','NASDAQ'];
+                var US_EX = ['NYSE','NASDAQ','TSX'];
                 var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
                 function _resolved(s) { return _exMap[s] || s; }
                 function configure(options) {
@@ -552,10 +552,13 @@
                 }
                 function getApiKey() { return _apiKey; }
                 function _dateStr(d) { var m=d.getMonth()+1, day=d.getDate(); return d.getFullYear()+'-'+(m<10?'0':'')+m+'-'+(day<10?'0':'')+day; }
+                function _sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
+                async function _api(url) {
+                    for(var a=0;a<3;a++){var r=await fetch(url);if(!r.ok)return null;var j=await r.json();if(j.code&&j.code===429){await _sleep(a===0?8000:15000);continue;}return j;}return null;
+                }
                 async function _fetchTS(symbol, start, end) {
                     var url = API_BASE+'/time_series?symbol='+encodeURIComponent(_resolved(symbol))+'&interval=1day&start_date='+start+'&end_date='+end+'&outputsize=1&apikey='+encodeURIComponent(_apiKey);
-                    var r = await fetch(url); if (!r.ok) return null; var j = await r.json();
-                    if (j.code) return null;
+                    var j = await _api(url); if (!j||j.code) return null;
                     return (j.values && j.values.length > 0) ? parseFloat(j.values[0].close) : null;
                 }
                 async function fetchQuotes(symbols) {
@@ -583,11 +586,7 @@
                         var oya = new Date(today); oya.setDate(oya.getDate()-365);
                         var oyaS = _dateStr(new Date(oya.getTime()-4*86400000)), oyaE = _dateStr(new Date(oya.getTime()+3*86400000));
                         var ts = Date.now();
-                        await Promise.all(stale.map(function(sym){
-                            return Promise.all([_fetchTS(sym,ytdS,ytdE),_fetchTS(sym,oyaS,oyaE)]).then(function(r){
-                                _histCache[sym]={ytdPrice:r[0],oneYearAgoPrice:r[1],_ts:ts};
-                            }).catch(function(e){console.warn('Historical fetch failed for '+sym+':',e.message);});
-                        }));
+                        for(var si=0;si<stale.length;si++){var sym=stale[si];try{var yp=await _fetchTS(sym,ytdS,ytdE);var op=await _fetchTS(sym,oyaS,oyaE);_histCache[sym]={ytdPrice:yp,oneYearAgoPrice:op,_ts:ts};}catch(e){console.warn('Historical fetch failed for '+sym+':',e.message);}}
                     }
                     var result = {};
                     for (var j=0;j<upper.length;j++) { var s=upper[j]; result[s]=_histCache[s]?{ytdPrice:_histCache[s].ytdPrice,oneYearAgoPrice:_histCache[s].oneYearAgoPrice}:null; }
@@ -599,7 +598,7 @@
                     for (var t=0;t<tries.length;t++) {
                         try {
                             var url = API_BASE+'/quote?symbol='+encodeURIComponent(tries[t])+'&apikey='+encodeURIComponent(_apiKey);
-                            var r = await fetch(url); if(!r.ok) continue; var q = await r.json();
+                            var q = await _api(url); if(!q) continue;
                             if(q.code===401) throw new Error(q.message||'Invalid API key'); if(q.code) continue;
                             if(q.symbol&&q.close){ _exMap[symbol]=tries[t]; return {price:parseFloat(q.close),previousClose:q.previous_close?parseFloat(q.previous_close):null,change:q.change?parseFloat(q.change):null,changePercent:q.percent_change?parseFloat(q.percent_change):null,currency:q.currency||'USD',name:q.name||q.symbol}; }
                         } catch(e){ if(e.message&&e.message.indexOf('Invalid API key')!==-1) throw e; }
@@ -608,9 +607,7 @@
                 }
                 async function _fetchFromTwelveData(symbols) {
                     var out = {};
-                    await Promise.all(symbols.map(function(symbol) {
-                        return _fetchQuoteWithFallback(symbol).then(function(res){if(res)out[symbol]=res;}).catch(function(err){console.warn('Failed to fetch '+symbol+':',err.message);});
-                    }));
+                    for(var si=0;si<symbols.length;si++){var symbol=symbols[si];try{var res=await _fetchQuoteWithFallback(symbol);if(res)out[symbol]=res;}catch(err){console.warn('Failed to fetch '+symbol+':',err.message);}}
                     return out;
                 }
                 function getCached(symbol) { var c=_cache[symbol.toUpperCase()]; if(!c)return null; var e=Object.assign({},c);delete e._ts;return e; }
