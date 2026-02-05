@@ -2,7 +2,8 @@
  * MarketData - Stock market data retrieval service.
  *
  * Fetches current stock prices and historical data from Twelve Data API.
- * Caches results to minimize API calls.
+ * Caches results to minimize API calls. Persists exchange resolutions
+ * to localStorage so subsequent page loads need fewer API calls.
  *
  * Setup:
  *   1. Get a free API key at https://twelvedata.com/pricing (takes 10 seconds)
@@ -21,20 +22,42 @@ const MarketData = (function () {
     'use strict';
 
     var STORAGE_KEY = 'marketDataApiKey';
+    var EXCHANGE_MAP_KEY = 'marketDataExchangeMap';
     var API_BASE = 'https://api.twelvedata.com';
     var _cache = {};
     var _historicalCache = {};
     var _cacheTTL = 5 * 60 * 1000; // 5 minutes
     var _historicalCacheTTL = 60 * 60 * 1000; // 1 hour (historical data rarely changes)
     var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
-    var _exchangeMap = {}; // Cache resolved exchanges for ambiguous symbols
+    var _exchangeMap = _loadExchangeMap();
     var US_EXCHANGES = ['NYSE', 'NASDAQ', 'TSX'];
+    var _onProgress = null;
+
+    // Proactive rate limiting to avoid 429s
+    var _callTimestamps = [];
+    var MAX_CALLS_PER_MINUTE = 7; // stay under 8/min free-tier limit
+
+    /** Load persisted exchange map from localStorage */
+    function _loadExchangeMap() {
+        try {
+            var saved = localStorage.getItem(EXCHANGE_MAP_KEY);
+            return saved ? JSON.parse(saved) : {};
+        } catch (e) { return {}; }
+    }
+
+    /** Save exchange map to localStorage */
+    function _saveExchangeMap() {
+        try {
+            localStorage.setItem(EXCHANGE_MAP_KEY, JSON.stringify(_exchangeMap));
+        } catch (e) { /* ignore quota errors */ }
+    }
 
     /**
      * Configure the service.
      * @param {Object} options
      * @param {string} [options.apiKey] - Twelve Data API key (persisted to localStorage)
      * @param {number} [options.cacheTTL] - Cache duration in ms (default 5 min)
+     * @param {Function} [options.onProgress] - Callback(symbol, type) called after each symbol is fetched
      */
     function configure(options) {
         if (options.cacheTTL !== undefined) _cacheTTL = options.cacheTTL;
@@ -42,6 +65,7 @@ const MarketData = (function () {
             _apiKey = options.apiKey;
             localStorage.setItem(STORAGE_KEY, _apiKey);
         }
+        if (options.onProgress !== undefined) _onProgress = options.onProgress;
     }
 
     /** @returns {string} The current API key */
@@ -65,13 +89,11 @@ const MarketData = (function () {
         });
 
         if (stale.length > 0) {
-            var fetched = await _fetchFromTwelveData(stale);
+            await _fetchFromTwelveData(stale);
+            // Mark any symbols that weren't fetched as null
             var ts = Date.now();
-            for (var sym in fetched) {
-                _cache[sym] = Object.assign({}, fetched[sym], { _ts: ts });
-            }
             for (var i = 0; i < stale.length; i++) {
-                if (!fetched[stale[i]] && !_cache[stale[i]]) {
+                if (!_cache[stale[i]]) {
                     _cache[stale[i]] = { price: null, _ts: ts };
                 }
             }
@@ -131,6 +153,7 @@ const MarketData = (function () {
                         oneYearAgoPrice: oyaPrice,
                         _ts: ts,
                     };
+                    if (_onProgress) _onProgress(symbol, 'historical');
                 } catch (err) {
                     console.warn('Failed to fetch historical for ' + symbol + ':', err.message);
                 }
@@ -155,10 +178,6 @@ const MarketData = (function () {
     /**
      * Fetch the closing price from a date range using time_series endpoint.
      * Returns the most recent closing price in the range, or null.
-     * @param {string} symbol
-     * @param {string} startDate - YYYY-MM-DD
-     * @param {string} endDate - YYYY-MM-DD
-     * @returns {Promise<number|null>}
      */
     async function _fetchTimeSeries(symbol, startDate, endDate) {
         var resolved = _resolvedSymbol(symbol);
@@ -181,13 +200,7 @@ const MarketData = (function () {
         return d.getFullYear() + '-' + (m < 10 ? '0' : '') + m + '-' + (day < 10 ? '0' : '') + day;
     }
 
-    /**
-     * Resolve the API symbol string for a given ticker.
-     * For ambiguous symbols (listed on multiple exchanges), tries US exchanges.
-     * Results are cached so subsequent calls don't waste API requests.
-     * @param {string} symbol - Plain ticker like "CAAP"
-     * @returns {string} Resolved symbol like "CAAP:NYSE" or plain "CAAP"
-     */
+    /** Resolve the API symbol string for a given ticker using cached exchange info. */
     function _resolvedSymbol(symbol) {
         return _exchangeMap[symbol] || symbol;
     }
@@ -198,19 +211,26 @@ const MarketData = (function () {
     }
 
     /**
-     * Make a single API call with rate-limit retry.
-     * If the API returns 429, waits and retries up to 2 times.
-     * @param {string} url
-     * @returns {Promise<Object|null>} Parsed JSON or null
+     * Make a single API call with proactive rate limiting and 429 retry.
+     * Proactively waits if we're approaching the per-minute call limit.
      */
     async function _apiCall(url) {
+        // Proactive rate limiting: wait if we'd exceed the limit
+        var now = Date.now();
+        _callTimestamps = _callTimestamps.filter(function (t) { return now - t < 60000; });
+        if (_callTimestamps.length >= MAX_CALLS_PER_MINUTE) {
+            var waitTime = 60000 - (now - _callTimestamps[0]) + 200;
+            if (waitTime > 0) await _sleep(waitTime);
+        }
+        _callTimestamps.push(Date.now());
+
         for (var attempt = 0; attempt < 3; attempt++) {
             var resp = await fetch(url);
             if (!resp.ok) return null;
             var json = await resp.json();
             if (json.code && json.code === 429) {
-                // Rate limited - wait and retry
-                await _sleep(attempt === 0 ? 8000 : 15000);
+                // Rate limited despite our proactive throttling - wait briefly and retry
+                await _sleep(attempt === 0 ? 3000 : 6000);
                 continue;
             }
             return json;
@@ -221,8 +241,6 @@ const MarketData = (function () {
     /**
      * Try fetching a quote for a single symbol. If no data is returned,
      * retry with exchange suffixes (NYSE, NASDAQ, TSX).
-     * @param {string} symbol
-     * @returns {Promise<Object|null>} Parsed quote data or null
      */
     async function _fetchQuoteWithFallback(symbol) {
         // If we already resolved this symbol's exchange, use it directly
@@ -244,8 +262,9 @@ const MarketData = (function () {
                 if (q.code && q.code === 401) throw new Error(q.message || 'Invalid API key');
                 if (q.code) continue;
                 if (q.symbol && q.close) {
-                    // Cache which exchange worked
+                    // Cache which exchange worked and persist it
                     _exchangeMap[symbol] = sym;
+                    _saveExchangeMap();
                     return {
                         price: parseFloat(q.close),
                         previousClose: q.previous_close ? parseFloat(q.previous_close) : null,
@@ -265,9 +284,8 @@ const MarketData = (function () {
 
     /**
      * Fetch quotes from Twelve Data API.
-     * Processes symbols sequentially to avoid hitting the 8 calls/min rate limit.
-     * @param {string[]} symbols
-     * @returns {Promise<Object>}
+     * Processes symbols sequentially with proactive rate limiting.
+     * Updates cache and calls onProgress after each symbol for incremental rendering.
      */
     async function _fetchFromTwelveData(symbols) {
         var out = {};
@@ -275,7 +293,12 @@ const MarketData = (function () {
             var symbol = symbols[i];
             try {
                 var result = await _fetchQuoteWithFallback(symbol);
-                if (result) out[symbol] = result;
+                if (result) {
+                    out[symbol] = result;
+                    // Update cache immediately for incremental rendering
+                    _cache[symbol] = Object.assign({}, result, { _ts: Date.now() });
+                    if (_onProgress) _onProgress(symbol, 'quote');
+                }
             } catch (err) {
                 console.warn('Failed to fetch ' + symbol + ':', err.message);
             }
@@ -285,8 +308,6 @@ const MarketData = (function () {
 
     /**
      * Get a previously cached quote without making a network request.
-     * @param {string} symbol
-     * @returns {QuoteData|null}
      */
     function getCached(symbol) {
         var c = _cache[symbol.toUpperCase()];
@@ -298,8 +319,6 @@ const MarketData = (function () {
 
     /**
      * Get cached historical data (YTD start price and 1Y ago price).
-     * @param {string} symbol
-     * @returns {{ ytdPrice: number|null, oneYearAgoPrice: number|null }|null}
      */
     function getHistorical(symbol) {
         var c = _historicalCache[symbol.toUpperCase()];
@@ -307,7 +326,7 @@ const MarketData = (function () {
         return { ytdPrice: c.ytdPrice, oneYearAgoPrice: c.oneYearAgoPrice };
     }
 
-    /** Clear all cached data. */
+    /** Clear all cached data including persisted exchange map. */
     function clearCache() {
         var k;
         for (k in _cache) {
@@ -319,6 +338,7 @@ const MarketData = (function () {
         for (k in _exchangeMap) {
             if (_exchangeMap.hasOwnProperty(k)) delete _exchangeMap[k];
         }
+        localStorage.removeItem(EXCHANGE_MAP_KEY);
     }
 
     return {

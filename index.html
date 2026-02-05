@@ -539,22 +539,30 @@
         if (typeof MarketData === 'undefined') {
             var MarketData = (function () {
                 'use strict';
-                var STORAGE_KEY = 'marketDataApiKey';
+                var STORAGE_KEY = 'marketDataApiKey', EX_KEY = 'marketDataExchangeMap';
                 var API_BASE = 'https://api.twelvedata.com';
-                var _cache = {}, _histCache = {}, _exMap = {};
+                var _cache = {}, _histCache = {};
                 var _cacheTTL = 5 * 60 * 1000, _histTTL = 60 * 60 * 1000;
                 var US_EX = ['NYSE','NASDAQ','TSX'];
                 var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
+                var _exMap = (function(){try{var s=localStorage.getItem(EX_KEY);return s?JSON.parse(s):{};}catch(e){return {};}})();
+                var _onProgress = null;
+                var _callTs = [], MAX_CPM = 7;
+                function _saveExMap(){try{localStorage.setItem(EX_KEY,JSON.stringify(_exMap));}catch(e){}}
                 function _resolved(s) { return _exMap[s] || s; }
                 function configure(options) {
                     if (options.cacheTTL !== undefined) _cacheTTL = options.cacheTTL;
                     if (options.apiKey !== undefined) { _apiKey = options.apiKey; localStorage.setItem(STORAGE_KEY, _apiKey); }
+                    if (options.onProgress !== undefined) _onProgress = options.onProgress;
                 }
                 function getApiKey() { return _apiKey; }
                 function _dateStr(d) { var m=d.getMonth()+1, day=d.getDate(); return d.getFullYear()+'-'+(m<10?'0':'')+m+'-'+(day<10?'0':'')+day; }
                 function _sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
                 async function _api(url) {
-                    for(var a=0;a<3;a++){var r=await fetch(url);if(!r.ok)return null;var j=await r.json();if(j.code&&j.code===429){await _sleep(a===0?8000:15000);continue;}return j;}return null;
+                    var now=Date.now();_callTs=_callTs.filter(function(t){return now-t<60000;});
+                    if(_callTs.length>=MAX_CPM){var w=60000-(now-_callTs[0])+200;if(w>0)await _sleep(w);}
+                    _callTs.push(Date.now());
+                    for(var a=0;a<3;a++){var r=await fetch(url);if(!r.ok)return null;var j=await r.json();if(j.code&&j.code===429){await _sleep(a===0?3000:6000);continue;}return j;}return null;
                 }
                 async function _fetchTS(symbol, start, end) {
                     var url = API_BASE+'/time_series?symbol='+encodeURIComponent(_resolved(symbol))+'&interval=1day&start_date='+start+'&end_date='+end+'&outputsize=1&apikey='+encodeURIComponent(_apiKey);
@@ -567,9 +575,8 @@
                     var now = Date.now(), upper = symbols.map(function(s){return s.toUpperCase();});
                     var stale = upper.filter(function(s){return !_cache[s]||(now-_cache[s]._ts>_cacheTTL);});
                     if (stale.length > 0) {
-                        var fetched = await _fetchFromTwelveData(stale); var ts = Date.now();
-                        for (var sym in fetched) { _cache[sym] = Object.assign({}, fetched[sym], {_ts:ts}); }
-                        for (var i=0;i<stale.length;i++) { if(!fetched[stale[i]]&&!_cache[stale[i]]){_cache[stale[i]]={price:null,_ts:ts};} }
+                        await _fetchFromTwelveData(stale); var ts = Date.now();
+                        for (var i=0;i<stale.length;i++) { if(!_cache[stale[i]]){_cache[stale[i]]={price:null,_ts:ts};} }
                     }
                     var result = {};
                     for (var j=0;j<upper.length;j++) { var s=upper[j]; if(_cache[s]){var e=Object.assign({},_cache[s]);delete e._ts;result[s]=e;}else{result[s]=null;} }
@@ -586,7 +593,7 @@
                         var oya = new Date(today); oya.setDate(oya.getDate()-365);
                         var oyaS = _dateStr(new Date(oya.getTime()-4*86400000)), oyaE = _dateStr(new Date(oya.getTime()+3*86400000));
                         var ts = Date.now();
-                        for(var si=0;si<stale.length;si++){var sym=stale[si];try{var yp=await _fetchTS(sym,ytdS,ytdE);var op=await _fetchTS(sym,oyaS,oyaE);_histCache[sym]={ytdPrice:yp,oneYearAgoPrice:op,_ts:ts};}catch(e){console.warn('Historical fetch failed for '+sym+':',e.message);}}
+                        for(var si=0;si<stale.length;si++){var sym=stale[si];try{var yp=await _fetchTS(sym,ytdS,ytdE);var op=await _fetchTS(sym,oyaS,oyaE);_histCache[sym]={ytdPrice:yp,oneYearAgoPrice:op,_ts:ts};if(_onProgress)_onProgress(sym,'historical');}catch(e){console.warn('Historical fetch failed for '+sym+':',e.message);}}
                     }
                     var result = {};
                     for (var j=0;j<upper.length;j++) { var s=upper[j]; result[s]=_histCache[s]?{ytdPrice:_histCache[s].ytdPrice,oneYearAgoPrice:_histCache[s].oneYearAgoPrice}:null; }
@@ -600,19 +607,19 @@
                             var url = API_BASE+'/quote?symbol='+encodeURIComponent(tries[t])+'&apikey='+encodeURIComponent(_apiKey);
                             var q = await _api(url); if(!q) continue;
                             if(q.code===401) throw new Error(q.message||'Invalid API key'); if(q.code) continue;
-                            if(q.symbol&&q.close){ _exMap[symbol]=tries[t]; return {price:parseFloat(q.close),previousClose:q.previous_close?parseFloat(q.previous_close):null,change:q.change?parseFloat(q.change):null,changePercent:q.percent_change?parseFloat(q.percent_change):null,currency:q.currency||'USD',name:q.name||q.symbol}; }
+                            if(q.symbol&&q.close){ _exMap[symbol]=tries[t]; _saveExMap(); return {price:parseFloat(q.close),previousClose:q.previous_close?parseFloat(q.previous_close):null,change:q.change?parseFloat(q.change):null,changePercent:q.percent_change?parseFloat(q.percent_change):null,currency:q.currency||'USD',name:q.name||q.symbol}; }
                         } catch(e){ if(e.message&&e.message.indexOf('Invalid API key')!==-1) throw e; }
                     }
                     return null;
                 }
                 async function _fetchFromTwelveData(symbols) {
                     var out = {};
-                    for(var si=0;si<symbols.length;si++){var symbol=symbols[si];try{var res=await _fetchQuoteWithFallback(symbol);if(res)out[symbol]=res;}catch(err){console.warn('Failed to fetch '+symbol+':',err.message);}}
+                    for(var si=0;si<symbols.length;si++){var symbol=symbols[si];try{var res=await _fetchQuoteWithFallback(symbol);if(res){out[symbol]=res;_cache[symbol]=Object.assign({},res,{_ts:Date.now()});if(_onProgress)_onProgress(symbol,'quote');}}catch(err){console.warn('Failed to fetch '+symbol+':',err.message);}}
                     return out;
                 }
                 function getCached(symbol) { var c=_cache[symbol.toUpperCase()]; if(!c)return null; var e=Object.assign({},c);delete e._ts;return e; }
                 function getHistorical(symbol) { var c=_histCache[symbol.toUpperCase()]; if(!c)return null; return {ytdPrice:c.ytdPrice,oneYearAgoPrice:c.oneYearAgoPrice}; }
-                function clearCache() { var k; for(k in _cache){if(_cache.hasOwnProperty(k))delete _cache[k];} for(k in _histCache){if(_histCache.hasOwnProperty(k))delete _histCache[k];} for(k in _exMap){if(_exMap.hasOwnProperty(k))delete _exMap[k];} }
+                function clearCache() { var k; for(k in _cache){if(_cache.hasOwnProperty(k))delete _cache[k];} for(k in _histCache){if(_histCache.hasOwnProperty(k))delete _histCache[k];} for(k in _exMap){if(_exMap.hasOwnProperty(k))delete _exMap[k];} localStorage.removeItem(EX_KEY); }
                 return { configure:configure, getApiKey:getApiKey, fetchQuotes:fetchQuotes, fetchHistorical:fetchHistorical, getCached:getCached, getHistorical:getHistorical, clearCache:clearCache };
             })();
         }
@@ -807,13 +814,29 @@
             const symbols = portfolio.map(s => s.name);
             const btn = document.getElementById('refreshPrices');
             const errorEl = document.getElementById('marketError');
+            const totalSymbols = symbols.length;
+            var quotesLoaded = 0;
 
-            btn.innerHTML = '<span class="loading-spinner"></span>Loading...';
+            btn.innerHTML = '<span class="loading-spinner"></span>Prices 0/' + totalSymbols + '...';
             btn.disabled = true;
             errorEl.classList.remove('visible');
 
+            // Set up progress callback for incremental rendering
+            MarketData.configure({
+                onProgress: function(symbol, type) {
+                    if (type === 'quote') {
+                        quotesLoaded++;
+                        btn.innerHTML = '<span class="loading-spinner"></span>Prices ' + quotesLoaded + '/' + totalSymbols + '...';
+                    } else if (type === 'historical') {
+                        btn.innerHTML = '<span class="loading-spinner"></span>History...';
+                    }
+                    renderPortfolio();
+                }
+            });
+
             try {
                 await MarketData.fetchQuotes(symbols);
+                btn.innerHTML = '<span class="loading-spinner"></span>History...';
                 if (MarketData.fetchHistorical) {
                     await MarketData.fetchHistorical(symbols);
                 }
@@ -831,6 +854,7 @@
             } finally {
                 btn.textContent = 'Refresh Prices';
                 btn.disabled = false;
+                MarketData.configure({ onProgress: null });
                 renderPortfolio();
             }
         }
