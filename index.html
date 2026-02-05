@@ -539,16 +539,18 @@
         if (typeof MarketData === 'undefined') {
             var MarketData = (function () {
                 'use strict';
-                var STORAGE_KEY = 'marketDataApiKey', EX_KEY = 'marketDataExchangeMap';
+                var STORAGE_KEY = 'marketDataApiKey', EX_KEY = 'marketDataExchangeMap', HIST_KEY = 'marketDataHistorical';
                 var API_BASE = 'https://api.twelvedata.com';
-                var _cache = {}, _histCache = {};
-                var _cacheTTL = 5 * 60 * 1000, _histTTL = 60 * 60 * 1000;
+                var _cache = {};
+                var _histCache = (function(){try{var s=localStorage.getItem(HIST_KEY);return s?JSON.parse(s):{};}catch(e){return {};}})();
+                var _cacheTTL = 5 * 60 * 1000, _histTTL = 24 * 60 * 60 * 1000;
                 var US_EX = ['NYSE','NASDAQ','TSX'];
                 var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
                 var _exMap = (function(){try{var s=localStorage.getItem(EX_KEY);return s?JSON.parse(s):{};}catch(e){return {};}})();
                 var _onProgress = null;
-                var _callTs = [], MAX_CPM = 7;
+                var _callTs = [], MAX_CPM = 8;
                 function _saveExMap(){try{localStorage.setItem(EX_KEY,JSON.stringify(_exMap));}catch(e){}}
+                function _saveHist(){try{localStorage.setItem(HIST_KEY,JSON.stringify(_histCache));}catch(e){}}
                 function _resolved(s) { return _exMap[s] || s; }
                 function configure(options) {
                     if (options.cacheTTL !== undefined) _cacheTTL = options.cacheTTL;
@@ -593,7 +595,7 @@
                         var oya = new Date(today); oya.setDate(oya.getDate()-365);
                         var oyaS = _dateStr(new Date(oya.getTime()-4*86400000)), oyaE = _dateStr(new Date(oya.getTime()+3*86400000));
                         var ts = Date.now();
-                        for(var si=0;si<stale.length;si++){var sym=stale[si];try{var yp=await _fetchTS(sym,ytdS,ytdE);var op=await _fetchTS(sym,oyaS,oyaE);_histCache[sym]={ytdPrice:yp,oneYearAgoPrice:op,_ts:ts};if(_onProgress)_onProgress(sym,'historical');}catch(e){console.warn('Historical fetch failed for '+sym+':',e.message);}}
+                        for(var si=0;si<stale.length;si++){var sym=stale[si];try{var yp=await _fetchTS(sym,ytdS,ytdE);var op=await _fetchTS(sym,oyaS,oyaE);_histCache[sym]={ytdPrice:yp,oneYearAgoPrice:op,_ts:ts};_saveHist();if(_onProgress)_onProgress(sym,'historical',si+1,stale.length);}catch(e){console.warn('Historical fetch failed for '+sym+':',e.message);}}
                     }
                     var result = {};
                     for (var j=0;j<upper.length;j++) { var s=upper[j]; result[s]=_histCache[s]?{ytdPrice:_histCache[s].ytdPrice,oneYearAgoPrice:_histCache[s].oneYearAgoPrice}:null; }
@@ -619,7 +621,7 @@
                 }
                 function getCached(symbol) { var c=_cache[symbol.toUpperCase()]; if(!c)return null; var e=Object.assign({},c);delete e._ts;return e; }
                 function getHistorical(symbol) { var c=_histCache[symbol.toUpperCase()]; if(!c)return null; return {ytdPrice:c.ytdPrice,oneYearAgoPrice:c.oneYearAgoPrice}; }
-                function clearCache() { var k; for(k in _cache){if(_cache.hasOwnProperty(k))delete _cache[k];} for(k in _histCache){if(_histCache.hasOwnProperty(k))delete _histCache[k];} for(k in _exMap){if(_exMap.hasOwnProperty(k))delete _exMap[k];} localStorage.removeItem(EX_KEY); }
+                function clearCache() { var k; for(k in _cache){if(_cache.hasOwnProperty(k))delete _cache[k];} for(k in _histCache){if(_histCache.hasOwnProperty(k))delete _histCache[k];} for(k in _exMap){if(_exMap.hasOwnProperty(k))delete _exMap[k];} localStorage.removeItem(EX_KEY); localStorage.removeItem(HIST_KEY); }
                 return { configure:configure, getApiKey:getApiKey, fetchQuotes:fetchQuotes, fetchHistorical:fetchHistorical, getCached:getCached, getHistorical:getHistorical, clearCache:clearCache };
             })();
         }
@@ -823,12 +825,12 @@
 
             // Set up progress callback for incremental rendering
             MarketData.configure({
-                onProgress: function(symbol, type) {
+                onProgress: function(symbol, type, done, total) {
                     if (type === 'quote') {
                         quotesLoaded++;
                         btn.innerHTML = '<span class="loading-spinner"></span>Prices ' + quotesLoaded + '/' + totalSymbols + '...';
                     } else if (type === 'historical') {
-                        btn.innerHTML = '<span class="loading-spinner"></span>History...';
+                        btn.innerHTML = '<span class="loading-spinner"></span>History ' + (done || '?') + '/' + (total || totalSymbols) + '...';
                     }
                     renderPortfolio();
                 }

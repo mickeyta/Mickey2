@@ -23,11 +23,12 @@ const MarketData = (function () {
 
     var STORAGE_KEY = 'marketDataApiKey';
     var EXCHANGE_MAP_KEY = 'marketDataExchangeMap';
+    var HISTORICAL_CACHE_KEY = 'marketDataHistorical';
     var API_BASE = 'https://api.twelvedata.com';
     var _cache = {};
-    var _historicalCache = {};
+    var _historicalCache = _loadHistoricalCache();
     var _cacheTTL = 5 * 60 * 1000; // 5 minutes
-    var _historicalCacheTTL = 60 * 60 * 1000; // 1 hour (historical data rarely changes)
+    var _historicalCacheTTL = 24 * 60 * 60 * 1000; // 24 hours (historical reference prices are fixed)
     var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
     var _exchangeMap = _loadExchangeMap();
     var US_EXCHANGES = ['NYSE', 'NASDAQ', 'TSX'];
@@ -35,7 +36,7 @@ const MarketData = (function () {
 
     // Proactive rate limiting to avoid 429s
     var _callTimestamps = [];
-    var MAX_CALLS_PER_MINUTE = 7; // stay under 8/min free-tier limit
+    var MAX_CALLS_PER_MINUTE = 8; // match the free-tier limit exactly
 
     /** Load persisted exchange map from localStorage */
     function _loadExchangeMap() {
@@ -49,6 +50,21 @@ const MarketData = (function () {
     function _saveExchangeMap() {
         try {
             localStorage.setItem(EXCHANGE_MAP_KEY, JSON.stringify(_exchangeMap));
+        } catch (e) { /* ignore quota errors */ }
+    }
+
+    /** Load persisted historical cache from localStorage */
+    function _loadHistoricalCache() {
+        try {
+            var saved = localStorage.getItem(HISTORICAL_CACHE_KEY);
+            return saved ? JSON.parse(saved) : {};
+        } catch (e) { return {}; }
+    }
+
+    /** Save historical cache to localStorage */
+    function _saveHistoricalCache() {
+        try {
+            localStorage.setItem(HISTORICAL_CACHE_KEY, JSON.stringify(_historicalCache));
         } catch (e) { /* ignore quota errors */ }
     }
 
@@ -153,7 +169,8 @@ const MarketData = (function () {
                         oneYearAgoPrice: oyaPrice,
                         _ts: ts,
                     };
-                    if (_onProgress) _onProgress(symbol, 'historical');
+                    _saveHistoricalCache();
+                    if (_onProgress) _onProgress(symbol, 'historical', idx + 1, stale.length);
                 } catch (err) {
                     console.warn('Failed to fetch historical for ' + symbol + ':', err.message);
                 }
@@ -339,6 +356,7 @@ const MarketData = (function () {
             if (_exchangeMap.hasOwnProperty(k)) delete _exchangeMap[k];
         }
         localStorage.removeItem(EXCHANGE_MAP_KEY);
+        localStorage.removeItem(HISTORICAL_CACHE_KEY);
     }
 
     return {
