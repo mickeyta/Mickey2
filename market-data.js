@@ -24,11 +24,14 @@ const MarketData = (function () {
     var STORAGE_KEY = 'marketDataApiKey';
     var EXCHANGE_MAP_KEY = 'marketDataExchangeMap';
     var HISTORICAL_CACHE_KEY = 'marketDataHistorical';
+    var FOREX_CACHE_KEY = 'marketDataForex';
     var API_BASE = 'https://api.twelvedata.com';
     var _cache = {};
     var _historicalCache = _loadHistoricalCache();
+    var _forexCache = _loadForexCache();
     var _cacheTTL = 5 * 60 * 1000; // 5 minutes
     var _historicalCacheTTL = 24 * 60 * 60 * 1000; // 24 hours (historical reference prices are fixed)
+    var _forexCacheTTL = 60 * 60 * 1000; // 1 hour for current forex rate
     var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
     var _exchangeMap = _loadExchangeMap();
     var US_EXCHANGES = ['NYSE', 'NASDAQ', 'TSX'];
@@ -65,6 +68,21 @@ const MarketData = (function () {
     function _saveHistoricalCache() {
         try {
             localStorage.setItem(HISTORICAL_CACHE_KEY, JSON.stringify(_historicalCache));
+        } catch (e) { /* ignore quota errors */ }
+    }
+
+    /** Load persisted forex cache from localStorage */
+    function _loadForexCache() {
+        try {
+            var saved = localStorage.getItem(FOREX_CACHE_KEY);
+            return saved ? JSON.parse(saved) : {};
+        } catch (e) { return {}; }
+    }
+
+    /** Save forex cache to localStorage */
+    function _saveForexCache() {
+        try {
+            localStorage.setItem(FOREX_CACHE_KEY, JSON.stringify(_forexCache));
         } catch (e) { /* ignore quota errors */ }
     }
 
@@ -324,6 +342,84 @@ const MarketData = (function () {
     }
 
     /**
+     * Fetch USD/ILS exchange rates: current, YTD start, and 1-year ago.
+     * Uses the same date windows as fetchHistorical for consistency.
+     * @returns {Promise<{current: number|null, ytdStart: number|null, oneYearAgo: number|null}>}
+     */
+    async function fetchForexRates() {
+        if (!_apiKey) throw new Error('API key not set');
+
+        var now = Date.now();
+        var needCurrent = !_forexCache.current || (now - _forexCache.current._ts > _forexCacheTTL);
+        var needHistorical = !_forexCache.ytdStart || (now - (_forexCache.ytdStart._ts || 0) > _historicalCacheTTL);
+
+        if (needCurrent) {
+            var url = API_BASE + '/quote?symbol=USD/ILS&apikey=' + encodeURIComponent(_apiKey);
+            var q = await _apiCall(url);
+            if (q && !q.code && q.close) {
+                _forexCache.current = { rate: parseFloat(q.close), _ts: Date.now() };
+                _saveForexCache();
+            }
+            if (_onProgress) _onProgress('USD/ILS', 'forex');
+        }
+
+        if (needHistorical) {
+            var today = new Date();
+            var year = today.getFullYear();
+            var ytdStart = (year - 1) + '-12-26';
+            var ytdEnd = (year - 1) + '-12-31';
+            var oneYearAgo = new Date(today);
+            oneYearAgo.setDate(oneYearAgo.getDate() - 365);
+            var oyaStart = _dateStr(new Date(oneYearAgo.getTime() - 4 * 86400000));
+            var oyaEnd = _dateStr(new Date(oneYearAgo.getTime() + 3 * 86400000));
+
+            var ytdRate = await _fetchForexTimeSeries(ytdStart, ytdEnd);
+            var oyaRate = await _fetchForexTimeSeries(oyaStart, oyaEnd);
+            var ts = Date.now();
+            if (ytdRate != null) {
+                _forexCache.ytdStart = { rate: ytdRate, _ts: ts };
+            }
+            if (oyaRate != null) {
+                _forexCache.oneYearAgo = { rate: oyaRate, _ts: ts };
+            }
+            _saveForexCache();
+            if (_onProgress) _onProgress('USD/ILS', 'forex');
+        }
+
+        return getForexRates();
+    }
+
+    /**
+     * Fetch USD/ILS closing rate for a date range.
+     * @param {string} startDate - YYYY-MM-DD
+     * @param {string} endDate - YYYY-MM-DD
+     * @returns {Promise<number|null>}
+     */
+    async function _fetchForexTimeSeries(startDate, endDate) {
+        var url = API_BASE + '/time_series?symbol=USD/ILS&interval=1day&start_date=' +
+            startDate + '&end_date=' + endDate +
+            '&outputsize=1&apikey=' + encodeURIComponent(_apiKey);
+        var json = await _apiCall(url);
+        if (!json || json.code) return null;
+        if (json.values && json.values.length > 0) {
+            return parseFloat(json.values[0].close);
+        }
+        return null;
+    }
+
+    /**
+     * Get cached forex rates (USD/ILS) without making network requests.
+     * @returns {{current: number|null, ytdStart: number|null, oneYearAgo: number|null}}
+     */
+    function getForexRates() {
+        return {
+            current: _forexCache.current ? _forexCache.current.rate : null,
+            ytdStart: _forexCache.ytdStart ? _forexCache.ytdStart.rate : null,
+            oneYearAgo: _forexCache.oneYearAgo ? _forexCache.oneYearAgo.rate : null,
+        };
+    }
+
+    /**
      * Get a previously cached quote without making a network request.
      */
     function getCached(symbol) {
@@ -355,8 +451,12 @@ const MarketData = (function () {
         for (k in _exchangeMap) {
             if (_exchangeMap.hasOwnProperty(k)) delete _exchangeMap[k];
         }
+        for (k in _forexCache) {
+            if (_forexCache.hasOwnProperty(k)) delete _forexCache[k];
+        }
         localStorage.removeItem(EXCHANGE_MAP_KEY);
         localStorage.removeItem(HISTORICAL_CACHE_KEY);
+        localStorage.removeItem(FOREX_CACHE_KEY);
     }
 
     return {
@@ -364,8 +464,10 @@ const MarketData = (function () {
         getApiKey: getApiKey,
         fetchQuotes: fetchQuotes,
         fetchHistorical: fetchHistorical,
+        fetchForexRates: fetchForexRates,
         getCached: getCached,
         getHistorical: getHistorical,
+        getForexRates: getForexRates,
         clearCache: clearCache,
     };
 })();
