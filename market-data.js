@@ -1,7 +1,8 @@
 /**
  * MarketData - Stock market data retrieval service.
  *
- * Fetches current stock prices and historical data from Twelve Data API.
+ * Fetches current stock prices and historical data from Twelve Data API
+ * (US/international stocks) and TASE API (Israeli stocks by security number).
  * Caches results to minimize API calls. Persists exchange resolutions
  * to localStorage so subsequent page loads need fewer API calls.
  *
@@ -9,6 +10,7 @@
  *   1. Get a free API key at https://twelvedata.com/pricing (takes 10 seconds)
  *   2. Enter the key in the app's API Key field, or call:
  *      MarketData.configure({ apiKey: 'YOUR_KEY' });
+ *   Note: Israeli stocks (numeric TASE security numbers) work without an API key.
  *
  * Usage:
  *   const quotes = await MarketData.fetchQuotes(['AAPL', 'MSFT']);
@@ -26,6 +28,11 @@ const MarketData = (function () {
     var HISTORICAL_CACHE_KEY = 'marketDataHistorical';
     var FOREX_CACHE_KEY = 'marketDataForex';
     var API_BASE = 'https://api.twelvedata.com';
+    var TASE_API_BASE = 'https://api.tase.co.il/api/';
+    var TASE_HEADERS = {
+        'Cache-Control': 'no-cache',
+        'referer': 'https://www.tase.co.il/',
+    };
     var _cache = {};
     var _historicalCache = _loadHistoricalCache();
     var _forexCache = _loadForexCache();
@@ -34,12 +41,17 @@ const MarketData = (function () {
     var _forexCacheTTL = 60 * 60 * 1000; // 1 hour for current forex rate
     var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
     var _exchangeMap = _loadExchangeMap();
-    var EXCHANGES = ['NYSE', 'NASDAQ', 'TSX', 'TASE'];
+    var EXCHANGES = ['NYSE', 'NASDAQ', 'TSX'];
     var _onProgress = null;
 
     // Proactive rate limiting to avoid 429s
     var _callTimestamps = [];
     var MAX_CALLS_PER_MINUTE = 8; // match the free-tier limit exactly
+
+    /** Check if a symbol is a TASE security number (all digits). */
+    function _isTaseNumber(symbol) {
+        return /^\d+$/.test(symbol);
+    }
 
     /** Load persisted exchange map from localStorage */
     function _loadExchangeMap() {
@@ -109,12 +121,13 @@ const MarketData = (function () {
 
     /**
      * Fetch current quotes for the given stock symbols.
+     * TASE security numbers (numeric) are fetched from the TASE API (no API key needed).
+     * Other symbols are fetched from Twelve Data (requires API key).
      * @param {string[]} symbols
      * @returns {Promise<Object.<string, QuoteData|null>>}
      */
     async function fetchQuotes(symbols) {
         if (!symbols || symbols.length === 0) return {};
-        if (!_apiKey) throw new Error('API key not set');
 
         var now = Date.now();
         var upper = symbols.map(function (s) { return s.toUpperCase(); });
@@ -123,7 +136,11 @@ const MarketData = (function () {
         });
 
         if (stale.length > 0) {
-            await _fetchFromTwelveData(stale);
+            // Check if non-TASE symbols need an API key
+            var hasNonTase = stale.some(function (s) { return !_isTaseNumber(s); });
+            if (hasNonTase && !_apiKey) throw new Error('API key not set');
+
+            await _fetchAllQuotes(stale);
             // Mark any symbols that weren't fetched as null
             var ts = Date.now();
             for (var i = 0; i < stale.length; i++) {
@@ -154,7 +171,10 @@ const MarketData = (function () {
      */
     async function fetchHistorical(symbols) {
         if (!symbols || symbols.length === 0) return {};
-        if (!_apiKey) throw new Error('API key not set');
+
+        // Only require API key if there are non-TASE symbols
+        var hasNonTase = symbols.some(function (s) { return !_isTaseNumber(s.toUpperCase()); });
+        if (hasNonTase && !_apiKey) throw new Error('API key not set');
 
         var now = Date.now();
         var upper = symbols.map(function (s) { return s.toUpperCase(); });
@@ -211,10 +231,13 @@ const MarketData = (function () {
     }
 
     /**
-     * Fetch the closing price from a date range using time_series endpoint.
-     * Returns the most recent closing price in the range, or null.
+     * Fetch the closing price from a date range.
+     * Routes to TASE API for numeric symbols, Twelve Data for others.
      */
     async function _fetchTimeSeries(symbol, startDate, endDate) {
+        if (_isTaseNumber(symbol)) {
+            return _fetchTaseTimeSeries(symbol, startDate, endDate);
+        }
         var resolved = _resolvedSymbol(symbol);
         var url = API_BASE + '/time_series?symbol=' + encodeURIComponent(resolved) +
             '&interval=1day&start_date=' + startDate + '&end_date=' + endDate +
@@ -227,6 +250,67 @@ const MarketData = (function () {
         }
         return null;
     }
+
+    // ---- TASE API functions (Israeli stocks) ----
+
+    /**
+     * Fetch a quote for a TASE security number from the TASE API.
+     * Prices are returned in Agorot (1/100 ILS) by the API, converted to ILS here.
+     */
+    async function _fetchTaseQuote(symbol) {
+        var url = TASE_API_BASE + 'company/securitydata?securityId=' +
+            encodeURIComponent(symbol) + '&lang=1';
+        try {
+            var resp = await fetch(url, { headers: TASE_HEADERS });
+            if (!resp.ok) return null;
+            var data = await resp.json();
+            if (!data || !data.LastRate) return null;
+            return {
+                price: data.LastRate / 100,
+                previousClose: data.BaseRate ? data.BaseRate / 100 : null,
+                change: data.BaseRate ? (data.LastRate - data.BaseRate) / 100 : null,
+                changePercent: data.Change || null,
+                currency: 'ILS',
+                name: data.SecurityLongName || data.CompanyName || data.Name || symbol,
+            };
+        } catch (err) {
+            console.warn('TASE API error for ' + symbol + ':', err.message);
+            return null;
+        }
+    }
+
+    /**
+     * Fetch historical closing price from TASE API for a date range.
+     * Returns the most recent CloseRate (converted from Agorot to ILS) in the range, or null.
+     */
+    async function _fetchTaseTimeSeries(symbol, startDate, endDate) {
+        var url = TASE_API_BASE + 'security/historyeod';
+        try {
+            var resp = await fetch(url, {
+                method: 'POST',
+                headers: Object.assign({ 'Content-Type': 'application/json' }, TASE_HEADERS),
+                body: JSON.stringify({
+                    dFrom: startDate,
+                    dTo: endDate,
+                    oId: symbol,
+                    pageNum: 1,
+                    pType: '8',
+                    TotalRec: 1,
+                    lang: '1',
+                }),
+            });
+            if (!resp.ok) return null;
+            var data = await resp.json();
+            if (!data || !data.Items || data.Items.length === 0) return null;
+            // Items are sorted newest first; take the most recent CloseRate
+            return data.Items[0].CloseRate / 100;
+        } catch (err) {
+            console.warn('TASE historical API error for ' + symbol + ':', err.message);
+            return null;
+        }
+    }
+
+    // ---- End TASE API functions ----
 
     /** Format a Date as YYYY-MM-DD */
     function _dateStr(d) {
@@ -246,7 +330,7 @@ const MarketData = (function () {
     }
 
     /**
-     * Make a single API call with proactive rate limiting and 429 retry.
+     * Make a single Twelve Data API call with proactive rate limiting and 429 retry.
      * Proactively waits if we're approaching the per-minute call limit.
      */
     async function _apiCall(url) {
@@ -275,18 +359,21 @@ const MarketData = (function () {
 
     /**
      * Try fetching a quote for a single symbol. If no data is returned,
-     * retry with exchange suffixes (NYSE, NASDAQ, TSX, TASE).
+     * retry with exchange suffixes (NYSE, NASDAQ, TSX).
+     * TASE security numbers are routed to the TASE API directly.
      */
     async function _fetchQuoteWithFallback(symbol) {
+        // Route TASE security numbers to the TASE API
+        if (_isTaseNumber(symbol)) {
+            return _fetchTaseQuote(symbol);
+        }
+
         // If we already resolved this symbol's exchange, use it directly
         var trySymbols = [_resolvedSymbol(symbol)];
         // Only add fallbacks if we haven't resolved the exchange yet
         if (!_exchangeMap[symbol]) {
-            // For numeric symbols (Israeli TASE stocks), only try TASE
-            var isNumeric = /^\d+$/.test(symbol);
-            var fallbackExchanges = isNumeric ? ['TASE'] : EXCHANGES;
-            for (var i = 0; i < fallbackExchanges.length; i++) {
-                var suffixed = symbol + ':' + fallbackExchanges[i];
+            for (var i = 0; i < EXCHANGES.length; i++) {
+                var suffixed = symbol + ':' + EXCHANGES[i];
                 if (trySymbols.indexOf(suffixed) === -1) trySymbols.push(suffixed);
             }
         }
@@ -321,11 +408,10 @@ const MarketData = (function () {
     }
 
     /**
-     * Fetch quotes from Twelve Data API.
-     * Processes symbols sequentially with proactive rate limiting.
+     * Fetch quotes for all symbols. Routes TASE and non-TASE symbols appropriately.
      * Updates cache and calls onProgress after each symbol for incremental rendering.
      */
-    async function _fetchFromTwelveData(symbols) {
+    async function _fetchAllQuotes(symbols) {
         var out = {};
         for (var i = 0; i < symbols.length; i++) {
             var symbol = symbols[i];

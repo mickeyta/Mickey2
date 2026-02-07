@@ -565,15 +565,18 @@
                 'use strict';
                 var STORAGE_KEY = 'marketDataApiKey', EX_KEY = 'marketDataExchangeMap', HIST_KEY = 'marketDataHistorical', FX_KEY = 'marketDataForex';
                 var API_BASE = 'https://api.twelvedata.com';
+                var TASE_BASE = 'https://api.tase.co.il/api/';
+                var TASE_HDR = {'Cache-Control':'no-cache','referer':'https://www.tase.co.il/'};
                 var _cache = {};
                 var _histCache = (function(){try{var s=localStorage.getItem(HIST_KEY);return s?JSON.parse(s):{};}catch(e){return {};}})();
                 var _fxCache = (function(){try{var s=localStorage.getItem(FX_KEY);return s?JSON.parse(s):{};}catch(e){return {};}})();
                 var _cacheTTL = 5 * 60 * 1000, _histTTL = 24 * 60 * 60 * 1000, _fxTTL = 60 * 60 * 1000;
-                var EXCHANGES = ['NYSE','NASDAQ','TSX','TASE'];
+                var EXCHANGES = ['NYSE','NASDAQ','TSX'];
                 var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
                 var _exMap = (function(){try{var s=localStorage.getItem(EX_KEY);return s?JSON.parse(s):{};}catch(e){return {};}})();
                 var _onProgress = null;
                 var _callTs = [], MAX_CPM = 8;
+                function _isTase(s){return /^\d+$/.test(s);}
                 function _saveExMap(){try{localStorage.setItem(EX_KEY,JSON.stringify(_exMap));}catch(e){}}
                 function _saveHist(){try{localStorage.setItem(HIST_KEY,JSON.stringify(_histCache));}catch(e){}}
                 function _saveFx(){try{localStorage.setItem(FX_KEY,JSON.stringify(_fxCache));}catch(e){}}
@@ -592,18 +595,26 @@
                     _callTs.push(Date.now());
                     for(var a=0;a<3;a++){var r=await fetch(url);if(!r.ok)return null;var j=await r.json();if(j.code&&j.code===429){await _sleep(a===0?3000:6000);continue;}return j;}return null;
                 }
+                async function _fetchTaseQuote(symbol) {
+                    try { var r=await fetch(TASE_BASE+'company/securitydata?securityId='+encodeURIComponent(symbol)+'&lang=1',{headers:TASE_HDR}); if(!r.ok)return null; var d=await r.json(); if(!d||!d.LastRate)return null; return {price:d.LastRate/100,previousClose:d.BaseRate?d.BaseRate/100:null,change:d.BaseRate?(d.LastRate-d.BaseRate)/100:null,changePercent:d.Change||null,currency:'ILS',name:d.SecurityLongName||d.CompanyName||d.Name||symbol}; } catch(e){ return null; }
+                }
+                async function _fetchTaseTS(symbol, start, end) {
+                    try { var r=await fetch(TASE_BASE+'security/historyeod',{method:'POST',headers:Object.assign({'Content-Type':'application/json'},TASE_HDR),body:JSON.stringify({dFrom:start,dTo:end,oId:symbol,pageNum:1,pType:'8',TotalRec:1,lang:'1'})}); if(!r.ok)return null; var d=await r.json(); if(!d||!d.Items||d.Items.length===0)return null; return d.Items[0].CloseRate/100; } catch(e){ return null; }
+                }
                 async function _fetchTS(symbol, start, end) {
+                    if(_isTase(symbol)) return _fetchTaseTS(symbol,start,end);
                     var url = API_BASE+'/time_series?symbol='+encodeURIComponent(_resolved(symbol))+'&interval=1day&start_date='+start+'&end_date='+end+'&outputsize=1&apikey='+encodeURIComponent(_apiKey);
                     var j = await _api(url); if (!j||j.code) return null;
                     return (j.values && j.values.length > 0) ? parseFloat(j.values[0].close) : null;
                 }
                 async function fetchQuotes(symbols) {
                     if (!symbols || symbols.length === 0) return {};
-                    if (!_apiKey) throw new Error('API key not set');
                     var now = Date.now(), upper = symbols.map(function(s){return s.toUpperCase();});
                     var stale = upper.filter(function(s){return !_cache[s]||(now-_cache[s]._ts>_cacheTTL);});
                     if (stale.length > 0) {
-                        await _fetchFromTwelveData(stale); var ts = Date.now();
+                        var hasNonTase=stale.some(function(s){return !_isTase(s);});
+                        if(hasNonTase&&!_apiKey) throw new Error('API key not set');
+                        await _fetchAll(stale); var ts = Date.now();
                         for (var i=0;i<stale.length;i++) { if(!_cache[stale[i]]){_cache[stale[i]]={price:null,_ts:ts};} }
                     }
                     var result = {};
@@ -612,7 +623,8 @@
                 }
                 async function fetchHistorical(symbols) {
                     if (!symbols || symbols.length === 0) return {};
-                    if (!_apiKey) throw new Error('API key not set');
+                    var hasNonTase=symbols.some(function(s){return !_isTase(s.toUpperCase());});
+                    if(hasNonTase&&!_apiKey) throw new Error('API key not set');
                     var now = Date.now(), upper = symbols.map(function(s){return s.toUpperCase();});
                     var stale = upper.filter(function(s){return !_histCache[s]||(now-_histCache[s]._ts>_histTTL);});
                     if (stale.length > 0) {
@@ -628,8 +640,9 @@
                     return result;
                 }
                 async function _fetchQuoteWithFallback(symbol) {
+                    if(_isTase(symbol)) return _fetchTaseQuote(symbol);
                     var tries = [_resolved(symbol)];
-                    if (!_exMap[symbol]) { var isNum=/^\d+$/.test(symbol); var exList=isNum?['TASE']:EXCHANGES; for (var x=0;x<exList.length;x++){var sf=symbol+':'+exList[x];if(tries.indexOf(sf)===-1)tries.push(sf);} }
+                    if (!_exMap[symbol]) { for (var x=0;x<EXCHANGES.length;x++){var sf=symbol+':'+EXCHANGES[x];if(tries.indexOf(sf)===-1)tries.push(sf);} }
                     for (var t=0;t<tries.length;t++) {
                         try {
                             var url = API_BASE+'/quote?symbol='+encodeURIComponent(tries[t])+'&apikey='+encodeURIComponent(_apiKey);
@@ -640,7 +653,7 @@
                     }
                     return null;
                 }
-                async function _fetchFromTwelveData(symbols) {
+                async function _fetchAll(symbols) {
                     var out = {};
                     for(var si=0;si<symbols.length;si++){var symbol=symbols[si];try{var res=await _fetchQuoteWithFallback(symbol);if(res){out[symbol]=res;_cache[symbol]=Object.assign({},res,{_ts:Date.now()});if(_onProgress)_onProgress(symbol,'quote');}}catch(err){console.warn('Failed to fetch '+symbol+':',err.message);}}
                     return out;
@@ -953,7 +966,7 @@
                 }
                 btn.innerHTML = '<span class="loading-spinner"></span>USD/ILS...';
                 if (MarketData.fetchForexRates) {
-                    await MarketData.fetchForexRates();
+                    try { await MarketData.fetchForexRates(); } catch(fxErr) { /* skip forex if no API key */ }
                 }
                 marketDataLoaded = true;
                 const now = new Date();
@@ -962,7 +975,7 @@
             } catch (err) {
                 marketDataLoaded = true;
                 var msg = err.message === 'API key not set'
-                    ? 'Please enter your free Twelve Data API key above to fetch live prices.'
+                    ? 'Please enter your free Twelve Data API key above to fetch US/international stock prices. Israeli stocks (TASE numbers) work without a key.'
                     : 'Could not fetch market data: ' + err.message;
                 errorEl.textContent = msg;
                 errorEl.classList.add('visible');
