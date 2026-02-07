@@ -20,7 +20,7 @@
         }
 
         .container {
-            max-width: 1000px;
+            max-width: 1100px;
             margin: 0 auto;
         }
 
@@ -394,8 +394,8 @@
             <form id="addStockForm">
                 <div class="form-row">
                     <div class="form-group">
-                        <label for="stockName">Stock Name / Symbol</label>
-                        <input type="text" id="stockName" placeholder="e.g., AAPL" required>
+                        <label for="stockName">Stock Symbol / TASE Number</label>
+                        <input type="text" id="stockName" placeholder="e.g., AAPL or 1081124" required>
                     </div>
                     <div class="form-group">
                         <label for="stockAmount">Amount (Shares)</label>
@@ -453,6 +453,7 @@
                     <thead>
                         <tr>
                             <th>Stock</th>
+                            <th>Company</th>
                             <th>Shares</th>
                             <th>Avg. Price</th>
                             <th>Current Price</th>
@@ -537,7 +538,7 @@
             <form id="editStockForm">
                 <input type="hidden" id="editIndex">
                 <div class="form-group">
-                    <label for="editStockName">Stock Name / Symbol</label>
+                    <label for="editStockName">Stock Symbol / TASE Number</label>
                     <input type="text" id="editStockName" required>
                 </div>
                 <div class="form-group" style="margin-top: 16px;">
@@ -568,7 +569,7 @@
                 var _histCache = (function(){try{var s=localStorage.getItem(HIST_KEY);return s?JSON.parse(s):{};}catch(e){return {};}})();
                 var _fxCache = (function(){try{var s=localStorage.getItem(FX_KEY);return s?JSON.parse(s):{};}catch(e){return {};}})();
                 var _cacheTTL = 5 * 60 * 1000, _histTTL = 24 * 60 * 60 * 1000, _fxTTL = 60 * 60 * 1000;
-                var US_EX = ['NYSE','NASDAQ','TSX'];
+                var EXCHANGES = ['NYSE','NASDAQ','TSX','TASE'];
                 var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
                 var _exMap = (function(){try{var s=localStorage.getItem(EX_KEY);return s?JSON.parse(s):{};}catch(e){return {};}})();
                 var _onProgress = null;
@@ -628,7 +629,7 @@
                 }
                 async function _fetchQuoteWithFallback(symbol) {
                     var tries = [_resolved(symbol)];
-                    if (!_exMap[symbol]) { for (var x=0;x<US_EX.length;x++){var sf=symbol+':'+US_EX[x];if(tries.indexOf(sf)===-1)tries.push(sf);} }
+                    if (!_exMap[symbol]) { var isNum=/^\d+$/.test(symbol); var exList=isNum?['TASE']:EXCHANGES; for (var x=0;x<exList.length;x++){var sf=symbol+':'+exList[x];if(tries.indexOf(sf)===-1)tries.push(sf);} }
                     for (var t=0;t<tries.length;t++) {
                         try {
                             var url = API_BASE+'/quote?symbol='+encodeURIComponent(tries[t])+'&apikey='+encodeURIComponent(_apiKey);
@@ -717,6 +718,8 @@
                 const quote = MarketData.getCached(stock.name);
                 const hist = MarketData.getHistorical ? MarketData.getHistorical(stock.name) : null;
                 const hasPrice = quote && quote.price != null;
+                const companyName = (quote && quote.name) ? quote.name : '';
+                const cur = (quote && quote.currency === 'ILS') ? '\u20AA' : '$';
 
                 let currentPriceHtml, marketValueHtml, gainLossHtml, ytdHtml, oneYearHtml;
 
@@ -728,9 +731,9 @@
                     const cls = gainLoss > 0 ? 'price-up' : gainLoss < 0 ? 'price-down' : 'price-neutral';
                     const sign = gainLoss >= 0 ? '+' : '';
 
-                    currentPriceHtml = `$${formatNumber(currentPrice, 2)}`;
-                    marketValueHtml = `<span class="${cls}">$${formatNumber(marketValue, 2)}</span>`;
-                    gainLossHtml = `<span class="gain-loss ${cls}">${sign}$${formatNumber(gainLoss, 2)} (${sign}${gainLossPct.toFixed(1)}%)</span>`;
+                    currentPriceHtml = `${cur}${formatNumber(currentPrice, 2)}`;
+                    marketValueHtml = `<span class="${cls}">${cur}${formatNumber(marketValue, 2)}</span>`;
+                    gainLossHtml = `<span class="gain-loss ${cls}">${sign}${cur}${formatNumber(gainLoss, 2)} (${sign}${gainLossPct.toFixed(1)}%)</span>`;
 
                     // YTD gain per stock
                     if (hist && hist.ytdPrice != null) {
@@ -755,7 +758,7 @@
                     }
                 } else {
                     currentPriceHtml = marketDataLoaded ? '<span class="price-neutral">N/A</span>' : '<span class="price-pending">--</span>';
-                    marketValueHtml = `$${formatNumber(costBasis, 2)}`;
+                    marketValueHtml = `${cur}${formatNumber(costBasis, 2)}`;
                     gainLossHtml = '<span class="price-neutral">--</span>';
                     ytdHtml = '<span class="price-neutral">--</span>';
                     oneYearHtml = '<span class="price-neutral">--</span>';
@@ -764,8 +767,9 @@
                 return `
                     <tr>
                         <td class="stock-name">${escapeHtml(stock.name)}</td>
+                        <td>${escapeHtml(companyName)}</td>
                         <td>${formatNumber(stock.amount)}</td>
-                        <td>$${formatNumber(stock.avgPrice, 2)}</td>
+                        <td>${cur}${formatNumber(stock.avgPrice, 2)}</td>
                         <td>${currentPriceHtml}</td>
                         <td class="total-value">${marketValueHtml}</td>
                         <td>${gainLossHtml}</td>

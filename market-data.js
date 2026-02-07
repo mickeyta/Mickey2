@@ -34,7 +34,7 @@ const MarketData = (function () {
     var _forexCacheTTL = 60 * 60 * 1000; // 1 hour for current forex rate
     var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
     var _exchangeMap = _loadExchangeMap();
-    var US_EXCHANGES = ['NYSE', 'NASDAQ', 'TSX'];
+    var EXCHANGES = ['NYSE', 'NASDAQ', 'TSX', 'TASE'];
     var _onProgress = null;
 
     // Proactive rate limiting to avoid 429s
@@ -275,15 +275,18 @@ const MarketData = (function () {
 
     /**
      * Try fetching a quote for a single symbol. If no data is returned,
-     * retry with exchange suffixes (NYSE, NASDAQ, TSX).
+     * retry with exchange suffixes (NYSE, NASDAQ, TSX, TASE).
      */
     async function _fetchQuoteWithFallback(symbol) {
         // If we already resolved this symbol's exchange, use it directly
         var trySymbols = [_resolvedSymbol(symbol)];
         // Only add fallbacks if we haven't resolved the exchange yet
         if (!_exchangeMap[symbol]) {
-            for (var i = 0; i < US_EXCHANGES.length; i++) {
-                var suffixed = symbol + ':' + US_EXCHANGES[i];
+            // For numeric symbols (Israeli TASE stocks), only try TASE
+            var isNumeric = /^\d+$/.test(symbol);
+            var fallbackExchanges = isNumeric ? ['TASE'] : EXCHANGES;
+            for (var i = 0; i < fallbackExchanges.length; i++) {
+                var suffixed = symbol + ':' + fallbackExchanges[i];
                 if (trySymbols.indexOf(suffixed) === -1) trySymbols.push(suffixed);
             }
         }
