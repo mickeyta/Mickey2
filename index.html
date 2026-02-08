@@ -559,131 +559,15 @@
 
     <script src="market-data.js"></script>
     <script>
-        // Inline fallback: if market-data.js failed to load (e.g. opened via file://), define it here
+        // Check that market-data.js loaded successfully
         if (typeof MarketData === 'undefined') {
-            var MarketData = (function () {
-                'use strict';
-                var STORAGE_KEY = 'marketDataApiKey', EX_KEY = 'marketDataExchangeMap', HIST_KEY = 'marketDataHistorical', FX_KEY = 'marketDataForex';
-                var API_BASE = 'https://api.twelvedata.com';
-                var TASE_BASE = 'https://api.tase.co.il/api/';
-                var TASE_PROXY = 'https://api.codetabs.com/v1/proxy/?quest=';
-                var _cache = {};
-                var _histCache = (function(){try{var s=localStorage.getItem(HIST_KEY);return s?JSON.parse(s):{};}catch(e){return {};}})();
-                var _fxCache = (function(){try{var s=localStorage.getItem(FX_KEY);return s?JSON.parse(s):{};}catch(e){return {};}})();
-                var _cacheTTL = 5 * 60 * 1000, _histTTL = 24 * 60 * 60 * 1000, _fxTTL = 60 * 60 * 1000;
-                var EXCHANGES = ['NYSE','NASDAQ','TSX'];
-                var _apiKey = localStorage.getItem(STORAGE_KEY) || '';
-                var _exMap = (function(){try{var s=localStorage.getItem(EX_KEY);return s?JSON.parse(s):{};}catch(e){return {};}})();
-                var _onProgress = null;
-                var _callTs = [], MAX_CPM = 8;
-                function _isTase(s){return /^\d+$/.test(s);}
-                function _saveExMap(){try{localStorage.setItem(EX_KEY,JSON.stringify(_exMap));}catch(e){}}
-                function _saveHist(){try{localStorage.setItem(HIST_KEY,JSON.stringify(_histCache));}catch(e){}}
-                function _saveFx(){try{localStorage.setItem(FX_KEY,JSON.stringify(_fxCache));}catch(e){}}
-                function _resolved(s) { return _exMap[s] || s; }
-                function configure(options) {
-                    if (options.cacheTTL !== undefined) _cacheTTL = options.cacheTTL;
-                    if (options.apiKey !== undefined) { _apiKey = options.apiKey; localStorage.setItem(STORAGE_KEY, _apiKey); }
-                    if (options.onProgress !== undefined) _onProgress = options.onProgress;
-                }
-                function getApiKey() { return _apiKey; }
-                function _dateStr(d) { var m=d.getMonth()+1, day=d.getDate(); return d.getFullYear()+'-'+(m<10?'0':'')+m+'-'+(day<10?'0':'')+day; }
-                function _sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
-                async function _api(url) {
-                    var now=Date.now();_callTs=_callTs.filter(function(t){return now-t<60000;});
-                    if(_callTs.length>=MAX_CPM){var w=60000-(now-_callTs[0])+200;if(w>0)await _sleep(w);}
-                    _callTs.push(Date.now());
-                    for(var a=0;a<3;a++){var r=await fetch(url);if(!r.ok)return null;var j=await r.json();if(j.code&&j.code===429){await _sleep(a===0?3000:6000);continue;}return j;}return null;
-                }
-                async function _fetchTaseQuote(symbol) {
-                    try { var tUrl=TASE_BASE+'company/securitydata?securityId='+encodeURIComponent(symbol)+'&lang=1'; var r=await fetch(TASE_PROXY+encodeURIComponent(tUrl)); if(!r.ok)return null; var d=await r.json(); if(!d||!d.LastRate)return null; var p=d.LastRate/100; var oyp=(d.AnnualYield!=null&&d.AnnualYield!==0)?p/(1+d.AnnualYield/100):null; _histCache[symbol]={ytdPrice:null,oneYearAgoPrice:oyp,_ts:Date.now()}; _saveHist(); return {price:p,previousClose:d.BaseRate?d.BaseRate/100:null,change:d.BaseRate?(d.LastRate-d.BaseRate)/100:null,changePercent:d.Change||null,currency:'ILS',name:d.SecurityLongName||d.CompanyName||d.Name||symbol}; } catch(e){ return null; }
-                }
-                async function _fetchTS(symbol, start, end) {
-                    if(_isTase(symbol)) return null;
-                    var url = API_BASE+'/time_series?symbol='+encodeURIComponent(_resolved(symbol))+'&interval=1day&start_date='+start+'&end_date='+end+'&outputsize=1&apikey='+encodeURIComponent(_apiKey);
-                    var j = await _api(url); if (!j||j.code) return null;
-                    return (j.values && j.values.length > 0) ? parseFloat(j.values[0].close) : null;
-                }
-                async function fetchQuotes(symbols) {
-                    if (!symbols || symbols.length === 0) return {};
-                    var now = Date.now(), upper = symbols.map(function(s){return s.toUpperCase();});
-                    var stale = upper.filter(function(s){return !_cache[s]||(now-_cache[s]._ts>_cacheTTL);});
-                    if (stale.length > 0) {
-                        var hasNonTase=stale.some(function(s){return !_isTase(s);});
-                        if(hasNonTase&&!_apiKey) throw new Error('API key not set');
-                        await _fetchAll(stale); var ts = Date.now();
-                        for (var i=0;i<stale.length;i++) { if(!_cache[stale[i]]){_cache[stale[i]]={price:null,_ts:ts};} }
-                    }
-                    var result = {};
-                    for (var j=0;j<upper.length;j++) { var s=upper[j]; if(_cache[s]){var e=Object.assign({},_cache[s]);delete e._ts;result[s]=e;}else{result[s]=null;} }
-                    return result;
-                }
-                async function fetchHistorical(symbols) {
-                    if (!symbols || symbols.length === 0) return {};
-                    var hasNonTase=symbols.some(function(s){return !_isTase(s.toUpperCase());});
-                    if(hasNonTase&&!_apiKey) throw new Error('API key not set');
-                    var now = Date.now(), upper = symbols.map(function(s){return s.toUpperCase();});
-                    var stale = upper.filter(function(s){return !_histCache[s]||(now-_histCache[s]._ts>_histTTL);});
-                    if (stale.length > 0) {
-                        var today = new Date(), year = today.getFullYear();
-                        var ytdS = (year-1)+'-12-26', ytdE = (year-1)+'-12-31';
-                        var oya = new Date(today); oya.setDate(oya.getDate()-365);
-                        var oyaS = _dateStr(new Date(oya.getTime()-4*86400000)), oyaE = _dateStr(new Date(oya.getTime()+3*86400000));
-                        var ts = Date.now();
-                        for(var si=0;si<stale.length;si++){var sym=stale[si];try{var yp=await _fetchTS(sym,ytdS,ytdE);var op=await _fetchTS(sym,oyaS,oyaE);_histCache[sym]={ytdPrice:yp,oneYearAgoPrice:op,_ts:ts};_saveHist();if(_onProgress)_onProgress(sym,'historical',si+1,stale.length);}catch(e){console.warn('Historical fetch failed for '+sym+':',e.message);}}
-                    }
-                    var result = {};
-                    for (var j=0;j<upper.length;j++) { var s=upper[j]; result[s]=_histCache[s]?{ytdPrice:_histCache[s].ytdPrice,oneYearAgoPrice:_histCache[s].oneYearAgoPrice}:null; }
-                    return result;
-                }
-                async function _fetchQuoteWithFallback(symbol) {
-                    if(_isTase(symbol)) return _fetchTaseQuote(symbol);
-                    var tries = [_resolved(symbol)];
-                    if (!_exMap[symbol]) { for (var x=0;x<EXCHANGES.length;x++){var sf=symbol+':'+EXCHANGES[x];if(tries.indexOf(sf)===-1)tries.push(sf);} }
-                    for (var t=0;t<tries.length;t++) {
-                        try {
-                            var url = API_BASE+'/quote?symbol='+encodeURIComponent(tries[t])+'&apikey='+encodeURIComponent(_apiKey);
-                            var q = await _api(url); if(!q) continue;
-                            if(q.code===401) throw new Error(q.message||'Invalid API key'); if(q.code) continue;
-                            if(q.symbol&&q.close){ _exMap[symbol]=tries[t]; _saveExMap(); return {price:parseFloat(q.close),previousClose:q.previous_close?parseFloat(q.previous_close):null,change:q.change?parseFloat(q.change):null,changePercent:q.percent_change?parseFloat(q.percent_change):null,currency:q.currency||'USD',name:q.name||q.symbol}; }
-                        } catch(e){ if(e.message&&e.message.indexOf('Invalid API key')!==-1) throw e; }
-                    }
-                    return null;
-                }
-                async function _fetchAll(symbols) {
-                    var out = {};
-                    for(var si=0;si<symbols.length;si++){var symbol=symbols[si];try{var res=await _fetchQuoteWithFallback(symbol);if(res){out[symbol]=res;_cache[symbol]=Object.assign({},res,{_ts:Date.now()});if(_onProgress)_onProgress(symbol,'quote');}}catch(err){console.warn('Failed to fetch '+symbol+':',err.message);}}
-                    return out;
-                }
-                async function fetchForexRates() {
-                    if (!_apiKey) throw new Error('API key not set');
-                    var now = Date.now();
-                    if (!_fxCache.current || (now - _fxCache.current._ts > _fxTTL)) {
-                        var url = API_BASE+'/quote?symbol=USD/ILS&apikey='+encodeURIComponent(_apiKey);
-                        var q = await _api(url);
-                        if (q && !q.code && q.close) { _fxCache.current = {rate:parseFloat(q.close),_ts:Date.now()}; _saveFx(); }
-                        if (_onProgress) _onProgress('USD/ILS','forex');
-                    }
-                    if (!_fxCache.ytdStart || (now - (_fxCache.ytdStart._ts||0) > _histTTL)) {
-                        var today = new Date(), year = today.getFullYear();
-                        var ytdS=(year-1)+'-12-26', ytdE=(year-1)+'-12-31';
-                        var oya=new Date(today); oya.setDate(oya.getDate()-365);
-                        var oyaS=_dateStr(new Date(oya.getTime()-4*86400000)), oyaE=_dateStr(new Date(oya.getTime()+3*86400000));
-                        var u1=API_BASE+'/time_series?symbol=USD/ILS&interval=1day&start_date='+ytdS+'&end_date='+ytdE+'&outputsize=1&apikey='+encodeURIComponent(_apiKey);
-                        var j1=await _api(u1); if(j1&&!j1.code&&j1.values&&j1.values.length>0){_fxCache.ytdStart={rate:parseFloat(j1.values[0].close),_ts:Date.now()};}
-                        var u2=API_BASE+'/time_series?symbol=USD/ILS&interval=1day&start_date='+oyaS+'&end_date='+oyaE+'&outputsize=1&apikey='+encodeURIComponent(_apiKey);
-                        var j2=await _api(u2); if(j2&&!j2.code&&j2.values&&j2.values.length>0){_fxCache.oneYearAgo={rate:parseFloat(j2.values[0].close),_ts:Date.now()};}
-                        _saveFx();
-                        if (_onProgress) _onProgress('USD/ILS','forex');
-                    }
-                    return getForexRates();
-                }
-                function getForexRates() { return {current:_fxCache.current?_fxCache.current.rate:null,ytdStart:_fxCache.ytdStart?_fxCache.ytdStart.rate:null,oneYearAgo:_fxCache.oneYearAgo?_fxCache.oneYearAgo.rate:null}; }
-                function getCached(symbol) { var c=_cache[symbol.toUpperCase()]; if(!c)return null; var e=Object.assign({},c);delete e._ts;return e; }
-                function getHistorical(symbol) { var c=_histCache[symbol.toUpperCase()]; if(!c)return null; return {ytdPrice:c.ytdPrice,oneYearAgoPrice:c.oneYearAgoPrice}; }
-                function clearCache() { var k; for(k in _cache){if(_cache.hasOwnProperty(k))delete _cache[k];} for(k in _histCache){if(_histCache.hasOwnProperty(k))delete _histCache[k];} for(k in _exMap){if(_exMap.hasOwnProperty(k))delete _exMap[k];} for(k in _fxCache){if(_fxCache.hasOwnProperty(k))delete _fxCache[k];} localStorage.removeItem(EX_KEY); localStorage.removeItem(HIST_KEY); localStorage.removeItem(FX_KEY); }
-                return { configure:configure, getApiKey:getApiKey, fetchQuotes:fetchQuotes, fetchHistorical:fetchHistorical, fetchForexRates:fetchForexRates, getCached:getCached, getHistorical:getHistorical, getForexRates:getForexRates, clearCache:clearCache };
-            })();
+            document.addEventListener('DOMContentLoaded', function() {
+                document.body.innerHTML = '<div style="max-width:600px;margin:80px auto;padding:30px;background:rgba(255,71,87,0.1);border:1px solid rgba(255,71,87,0.3);border-radius:12px;color:#ff6b7a;font-family:sans-serif;text-align:center;">' +
+                    '<h2 style="margin-bottom:16px;">Market Data Module Not Found</h2>' +
+                    '<p style="margin-bottom:12px;">Could not load <code>market-data.js</code>. Make sure this file is served from a web server (not opened directly as a file).</p>' +
+                    '<p style="color:#a0a0a0;font-size:0.9rem;">Tip: Run <code>python3 -m http.server</code> in the project folder, then open <code>http://localhost:8000</code></p>' +
+                    '</div>';
+            });
         }
     </script>
     <script>

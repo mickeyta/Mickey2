@@ -29,7 +29,10 @@ const MarketData = (function () {
     var FOREX_CACHE_KEY = 'marketDataForex';
     var API_BASE = 'https://api.twelvedata.com';
     var TASE_API_BASE = 'https://api.tase.co.il/api/';
-    var TASE_PROXY = 'https://api.codetabs.com/v1/proxy/?quest=';
+    var TASE_PROXIES = [
+        { prefix: 'https://corsproxy.io/?url=', encode: true },
+        { prefix: 'https://api.codetabs.com/v1/proxy/?quest=', encode: true },
+    ];
     var _cache = {};
     var _historicalCache = _loadHistoricalCache();
     var _forexCache = _loadForexCache();
@@ -253,6 +256,28 @@ const MarketData = (function () {
     // Historical prices are derived from AnnualYield in the quote response.
 
     /**
+     * Fetch a URL through CORS proxies, trying each in order until one succeeds.
+     * Returns the parsed JSON response or null if all fail.
+     */
+    async function _fetchViaProxy(targetUrl) {
+        for (var i = 0; i < TASE_PROXIES.length; i++) {
+            var proxy = TASE_PROXIES[i];
+            var url = proxy.prefix + (proxy.encode ? encodeURIComponent(targetUrl) : targetUrl);
+            try {
+                var resp = await fetch(url);
+                if (!resp.ok) continue;
+                var text = await resp.text();
+                // Some proxies return error pages as HTML
+                if (text.charAt(0) !== '{' && text.charAt(0) !== '[') continue;
+                return JSON.parse(text);
+            } catch (err) {
+                console.warn('Proxy ' + (i + 1) + ' failed for TASE:', err.message);
+            }
+        }
+        return null;
+    }
+
+    /**
      * Fetch a quote for a TASE security number via CORS proxy.
      * Prices are in Agorot (1/100 ILS), converted to ILS here.
      * Also pre-populates the historical cache from AnnualYield data.
@@ -260,11 +285,8 @@ const MarketData = (function () {
     async function _fetchTaseQuote(symbol) {
         var taseUrl = TASE_API_BASE + 'company/securitydata?securityId=' +
             encodeURIComponent(symbol) + '&lang=1';
-        var url = TASE_PROXY + encodeURIComponent(taseUrl);
         try {
-            var resp = await fetch(url);
-            if (!resp.ok) return null;
-            var data = await resp.json();
+            var data = await _fetchViaProxy(taseUrl);
             if (!data || !data.LastRate) return null;
             var price = data.LastRate / 100;
 
