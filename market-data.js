@@ -29,10 +29,7 @@ const MarketData = (function () {
     var FOREX_CACHE_KEY = 'marketDataForex';
     var API_BASE = 'https://api.twelvedata.com';
     var TASE_API_BASE = 'https://api.tase.co.il/api/';
-    var TASE_HEADERS = {
-        'Cache-Control': 'no-cache',
-        'referer': 'https://www.tase.co.il/',
-    };
+    var TASE_PROXY = 'https://api.codetabs.com/v1/proxy/?quest=';
     var _cache = {};
     var _historicalCache = _loadHistoricalCache();
     var _forexCache = _loadForexCache();
@@ -235,9 +232,8 @@ const MarketData = (function () {
      * Routes to TASE API for numeric symbols, Twelve Data for others.
      */
     async function _fetchTimeSeries(symbol, startDate, endDate) {
-        if (_isTaseNumber(symbol)) {
-            return _fetchTaseTimeSeries(symbol, startDate, endDate);
-        }
+        // TASE historical is pre-populated from the quote's AnnualYield
+        if (_isTaseNumber(symbol)) return null;
         var resolved = _resolvedSymbol(symbol);
         var url = API_BASE + '/time_series?symbol=' + encodeURIComponent(resolved) +
             '&interval=1day&start_date=' + startDate + '&end_date=' + endDate +
@@ -252,21 +248,38 @@ const MarketData = (function () {
     }
 
     // ---- TASE API functions (Israeli stocks) ----
+    // TASE API requires Referer: https://www.tase.co.il/ which browsers can't set
+    // cross-origin, so we route through a CORS proxy for the GET endpoint.
+    // Historical prices are derived from AnnualYield in the quote response.
 
     /**
-     * Fetch a quote for a TASE security number from the TASE API.
-     * Prices are returned in Agorot (1/100 ILS) by the API, converted to ILS here.
+     * Fetch a quote for a TASE security number via CORS proxy.
+     * Prices are in Agorot (1/100 ILS), converted to ILS here.
+     * Also pre-populates the historical cache from AnnualYield data.
      */
     async function _fetchTaseQuote(symbol) {
-        var url = TASE_API_BASE + 'company/securitydata?securityId=' +
+        var taseUrl = TASE_API_BASE + 'company/securitydata?securityId=' +
             encodeURIComponent(symbol) + '&lang=1';
+        var url = TASE_PROXY + encodeURIComponent(taseUrl);
         try {
-            var resp = await fetch(url, { headers: TASE_HEADERS });
+            var resp = await fetch(url);
             if (!resp.ok) return null;
             var data = await resp.json();
             if (!data || !data.LastRate) return null;
+            var price = data.LastRate / 100;
+
+            // Pre-populate historical cache from yield data
+            var oneYearAgoPrice = (data.AnnualYield != null && data.AnnualYield !== 0)
+                ? price / (1 + data.AnnualYield / 100) : null;
+            _historicalCache[symbol] = {
+                ytdPrice: null,
+                oneYearAgoPrice: oneYearAgoPrice,
+                _ts: Date.now(),
+            };
+            _saveHistoricalCache();
+
             return {
-                price: data.LastRate / 100,
+                price: price,
                 previousClose: data.BaseRate ? data.BaseRate / 100 : null,
                 change: data.BaseRate ? (data.LastRate - data.BaseRate) / 100 : null,
                 changePercent: data.Change || null,
@@ -275,37 +288,6 @@ const MarketData = (function () {
             };
         } catch (err) {
             console.warn('TASE API error for ' + symbol + ':', err.message);
-            return null;
-        }
-    }
-
-    /**
-     * Fetch historical closing price from TASE API for a date range.
-     * Returns the most recent CloseRate (converted from Agorot to ILS) in the range, or null.
-     */
-    async function _fetchTaseTimeSeries(symbol, startDate, endDate) {
-        var url = TASE_API_BASE + 'security/historyeod';
-        try {
-            var resp = await fetch(url, {
-                method: 'POST',
-                headers: Object.assign({ 'Content-Type': 'application/json' }, TASE_HEADERS),
-                body: JSON.stringify({
-                    dFrom: startDate,
-                    dTo: endDate,
-                    oId: symbol,
-                    pageNum: 1,
-                    pType: '8',
-                    TotalRec: 1,
-                    lang: '1',
-                }),
-            });
-            if (!resp.ok) return null;
-            var data = await resp.json();
-            if (!data || !data.Items || data.Items.length === 0) return null;
-            // Items are sorted newest first; take the most recent CloseRate
-            return data.Items[0].CloseRate / 100;
-        } catch (err) {
-            console.warn('TASE historical API error for ' + symbol + ':', err.message);
             return null;
         }
     }

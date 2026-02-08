@@ -566,7 +566,7 @@
                 var STORAGE_KEY = 'marketDataApiKey', EX_KEY = 'marketDataExchangeMap', HIST_KEY = 'marketDataHistorical', FX_KEY = 'marketDataForex';
                 var API_BASE = 'https://api.twelvedata.com';
                 var TASE_BASE = 'https://api.tase.co.il/api/';
-                var TASE_HDR = {'Cache-Control':'no-cache','referer':'https://www.tase.co.il/'};
+                var TASE_PROXY = 'https://api.codetabs.com/v1/proxy/?quest=';
                 var _cache = {};
                 var _histCache = (function(){try{var s=localStorage.getItem(HIST_KEY);return s?JSON.parse(s):{};}catch(e){return {};}})();
                 var _fxCache = (function(){try{var s=localStorage.getItem(FX_KEY);return s?JSON.parse(s):{};}catch(e){return {};}})();
@@ -596,13 +596,10 @@
                     for(var a=0;a<3;a++){var r=await fetch(url);if(!r.ok)return null;var j=await r.json();if(j.code&&j.code===429){await _sleep(a===0?3000:6000);continue;}return j;}return null;
                 }
                 async function _fetchTaseQuote(symbol) {
-                    try { var r=await fetch(TASE_BASE+'company/securitydata?securityId='+encodeURIComponent(symbol)+'&lang=1',{headers:TASE_HDR}); if(!r.ok)return null; var d=await r.json(); if(!d||!d.LastRate)return null; return {price:d.LastRate/100,previousClose:d.BaseRate?d.BaseRate/100:null,change:d.BaseRate?(d.LastRate-d.BaseRate)/100:null,changePercent:d.Change||null,currency:'ILS',name:d.SecurityLongName||d.CompanyName||d.Name||symbol}; } catch(e){ return null; }
-                }
-                async function _fetchTaseTS(symbol, start, end) {
-                    try { var r=await fetch(TASE_BASE+'security/historyeod',{method:'POST',headers:Object.assign({'Content-Type':'application/json'},TASE_HDR),body:JSON.stringify({dFrom:start,dTo:end,oId:symbol,pageNum:1,pType:'8',TotalRec:1,lang:'1'})}); if(!r.ok)return null; var d=await r.json(); if(!d||!d.Items||d.Items.length===0)return null; return d.Items[0].CloseRate/100; } catch(e){ return null; }
+                    try { var tUrl=TASE_BASE+'company/securitydata?securityId='+encodeURIComponent(symbol)+'&lang=1'; var r=await fetch(TASE_PROXY+encodeURIComponent(tUrl)); if(!r.ok)return null; var d=await r.json(); if(!d||!d.LastRate)return null; var p=d.LastRate/100; var oyp=(d.AnnualYield!=null&&d.AnnualYield!==0)?p/(1+d.AnnualYield/100):null; _histCache[symbol]={ytdPrice:null,oneYearAgoPrice:oyp,_ts:Date.now()}; _saveHist(); return {price:p,previousClose:d.BaseRate?d.BaseRate/100:null,change:d.BaseRate?(d.LastRate-d.BaseRate)/100:null,changePercent:d.Change||null,currency:'ILS',name:d.SecurityLongName||d.CompanyName||d.Name||symbol}; } catch(e){ return null; }
                 }
                 async function _fetchTS(symbol, start, end) {
-                    if(_isTase(symbol)) return _fetchTaseTS(symbol,start,end);
+                    if(_isTase(symbol)) return null;
                     var url = API_BASE+'/time_series?symbol='+encodeURIComponent(_resolved(symbol))+'&interval=1day&start_date='+start+'&end_date='+end+'&outputsize=1&apikey='+encodeURIComponent(_apiKey);
                     var j = await _api(url); if (!j||j.code) return null;
                     return (j.values && j.values.length > 0) ? parseFloat(j.values[0].close) : null;
