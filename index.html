@@ -551,6 +551,8 @@
                 const costBasis = stock.amount * stock.avgPrice;
                 const quote = MarketData.getCached(stock.name);
                 const hasPrice = quote && quote.price != null;
+                const currSymbol = (quote && quote.currency === 'ILS') ? '\u20AA' : '$';
+                const displayName = (quote && quote.name) ? quote.name : '';
 
                 let currentPriceHtml, marketValueHtml, gainLossHtml;
 
@@ -562,20 +564,20 @@
                     const cls = gainLoss > 0 ? 'price-up' : gainLoss < 0 ? 'price-down' : 'price-neutral';
                     const sign = gainLoss >= 0 ? '+' : '';
 
-                    currentPriceHtml = `$${formatNumber(currentPrice, 2)}`;
-                    marketValueHtml = `<span class="${cls}">$${formatNumber(marketValue, 2)}</span>`;
-                    gainLossHtml = `<span class="gain-loss ${cls}">${sign}$${formatNumber(gainLoss, 2)} (${sign}${gainLossPct.toFixed(1)}%)</span>`;
+                    currentPriceHtml = `${currSymbol}${formatNumber(currentPrice, 2)}`;
+                    marketValueHtml = `<span class="${cls}">${currSymbol}${formatNumber(marketValue, 2)}</span>`;
+                    gainLossHtml = `<span class="gain-loss ${cls}">${sign}${currSymbol}${formatNumber(gainLoss, 2)} (${sign}${gainLossPct.toFixed(1)}%)</span>`;
                 } else {
                     currentPriceHtml = marketDataLoaded ? '<span class="price-neutral">N/A</span>' : '<span class="price-pending">--</span>';
-                    marketValueHtml = `$${formatNumber(costBasis, 2)}`;
+                    marketValueHtml = `${currSymbol}${formatNumber(costBasis, 2)}`;
                     gainLossHtml = '<span class="price-neutral">--</span>';
                 }
 
                 return `
                     <tr>
-                        <td class="stock-name">${escapeHtml(stock.name)}</td>
+                        <td class="stock-name">${escapeHtml(stock.name)}${displayName ? '<br><small style="color:#a0a0a0;font-weight:normal">' + escapeHtml(displayName) + '</small>' : ''}</td>
                         <td>${formatNumber(stock.amount)}</td>
-                        <td>$${formatNumber(stock.avgPrice, 2)}</td>
+                        <td>${currSymbol}${formatNumber(stock.avgPrice, 2)}</td>
                         <td>${currentPriceHtml}</td>
                         <td class="total-value">${marketValueHtml}</td>
                         <td>${gainLossHtml}</td>

@@ -30,8 +30,18 @@ const MarketData = (function () {
     }
 
     /**
+     * Check if a symbol looks like an Israeli fund ID (numeric, typically 7 digits).
+     * @param {string} symbol
+     * @returns {boolean}
+     */
+    function _isIsraeliFund(symbol) {
+        return /^\d{5,8}$/.test(symbol);
+    }
+
+    /**
      * Fetch current quotes for the given stock symbols.
      * Returns a map of symbol -> quote data. Symbols without data will have null.
+     * Automatically routes Israeli fund IDs to the TASE Maya API.
      * @param {string[]} symbols
      * @returns {Promise<Object.<string, QuoteData|null>>}
      */
@@ -45,7 +55,26 @@ const MarketData = (function () {
         });
 
         if (stale.length > 0) {
-            var fetched = await _fetchFromYahoo(stale);
+            // Separate Israeli funds from regular symbols
+            var israeliFunds = stale.filter(_isIsraeliFund);
+            var regularSymbols = stale.filter(function (s) { return !_isIsraeliFund(s); });
+
+            // Fetch both in parallel
+            var fetchPromises = [];
+            if (regularSymbols.length > 0) {
+                fetchPromises.push(_fetchFromYahoo(regularSymbols));
+            } else {
+                fetchPromises.push(Promise.resolve({}));
+            }
+            if (israeliFunds.length > 0) {
+                fetchPromises.push(_fetchFromTASE(israeliFunds));
+            } else {
+                fetchPromises.push(Promise.resolve({}));
+            }
+
+            var results = await Promise.all(fetchPromises);
+            var fetched = Object.assign({}, results[0], results[1]);
+
             var ts = Date.now();
             for (var sym in fetched) {
                 _cache[sym] = Object.assign({}, fetched[sym], { _ts: ts });
@@ -103,6 +132,47 @@ const MarketData = (function () {
             };
         }
 
+        return out;
+    }
+
+    /**
+     * Fetch quote data for Israeli funds from the TASE Maya API.
+     * Each fund is fetched individually and results are merged.
+     * @param {string[]} fundIds
+     * @returns {Promise<Object>}
+     */
+    async function _fetchFromTASE(fundIds) {
+        var out = {};
+        var promises = fundIds.map(function (id) {
+            var url = _corsProxy +
+                'https://mayaapi.tase.co.il/api/fund/details?fundId=' + encodeURIComponent(id);
+
+            return fetch(url, {
+                headers: {
+                    'X-Maya-With': 'allow',
+                    'Accept-Language': 'en-US',
+                }
+            }).then(function (resp) {
+                if (!resp.ok) return null;
+                return resp.json();
+            }).then(function (data) {
+                if (!data || data.UnitValuePrice == null) return;
+                // UnitValuePrice is in agorot (1/100 ILS), convert to ILS
+                var priceILS = data.UnitValuePrice / 100;
+                out[id] = {
+                    price: priceILS,
+                    previousClose: null,
+                    change: null,
+                    changePercent: data.DayYield != null ? data.DayYield : null,
+                    currency: 'ILS',
+                    name: data.FundLongName || data.FundShortName || id,
+                };
+            }).catch(function () {
+                // Silently ignore individual fund fetch failures
+            });
+        });
+
+        await Promise.all(promises);
         return out;
     }
 
