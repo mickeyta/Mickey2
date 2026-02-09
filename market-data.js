@@ -107,9 +107,9 @@ const MarketData = (function () {
      * @returns {Promise<Object>}
      */
     async function _fetchFromYahoo(symbols) {
-        var url = _corsProxy +
-            'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' +
-            encodeURIComponent(symbols.join(','));
+        var url = _corsProxy
+            ? _corsProxy + 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' + encodeURIComponent(symbols.join(','))
+            : '/api/yahoo?symbols=' + encodeURIComponent(symbols.join(','));
 
         var resp = await fetch(url);
         if (!resp.ok) {
@@ -144,15 +144,11 @@ const MarketData = (function () {
     async function _fetchFromTASE(fundIds) {
         var out = {};
         var promises = fundIds.map(function (id) {
-            var url = _corsProxy +
-                'https://mayaapi.tase.co.il/api/fund/details?fundId=' + encodeURIComponent(id);
+            var url = _corsProxy
+                ? _corsProxy + 'https://mayaapi.tase.co.il/api/fund/details?fundId=' + encodeURIComponent(id)
+                : '/api/tase/fund?fundId=' + encodeURIComponent(id);
 
-            return fetch(url, {
-                headers: {
-                    'X-Maya-With': 'allow',
-                    'Accept-Language': 'en-US',
-                }
-            }).then(function (resp) {
+            return fetch(url).then(function (resp) {
                 if (!resp.ok) return null;
                 return resp.json();
             }).then(function (data) {
