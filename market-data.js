@@ -17,6 +17,8 @@ const MarketData = (function () {
     const _cache = {};
     let _cacheTTL = 5 * 60 * 1000; // 5 minutes
     let _corsProxy = '';
+    let _useLocalProxy = false;
+    const _PUBLIC_CORS_PROXY = 'https://api.allorigins.win/raw?url=';
 
     /**
      * Configure the service.
@@ -27,6 +29,20 @@ const MarketData = (function () {
     function configure(options) {
         if (options.cacheTTL !== undefined) _cacheTTL = options.cacheTTL;
         if (options.corsProxy !== undefined) _corsProxy = options.corsProxy;
+    }
+
+    /**
+     * Detect whether the local proxy server is available.
+     * Called once on first fetch. If available, uses local /api/* routes;
+     * otherwise falls back to a public CORS proxy.
+     */
+    var _probePromise = null;
+    function _probeLocalProxy() {
+        if (_probePromise) return _probePromise;
+        _probePromise = fetch('/api/yahoo?symbols=TEST', { method: 'HEAD' })
+            .then(function () { _useLocalProxy = true; })
+            .catch(function () { _useLocalProxy = false; });
+        return _probePromise;
     }
 
     /**
@@ -47,6 +63,9 @@ const MarketData = (function () {
      */
     async function fetchQuotes(symbols) {
         if (!symbols || symbols.length === 0) return {};
+
+        // Auto-detect proxy on first call (unless user configured corsProxy)
+        if (!_corsProxy) await _probeLocalProxy();
 
         const now = Date.now();
         const upper = symbols.map(function (s) { return s.toUpperCase(); });
@@ -107,9 +126,10 @@ const MarketData = (function () {
      * @returns {Promise<Object>}
      */
     async function _fetchFromYahoo(symbols) {
-        var url = _corsProxy
-            ? _corsProxy + 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' + encodeURIComponent(symbols.join(','))
-            : '/api/yahoo?symbols=' + encodeURIComponent(symbols.join(','));
+        var externalUrl = 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' + encodeURIComponent(symbols.join(','));
+        var url = _useLocalProxy
+            ? '/api/yahoo?symbols=' + encodeURIComponent(symbols.join(','))
+            : (_corsProxy ? _corsProxy + externalUrl : _PUBLIC_CORS_PROXY + encodeURIComponent(externalUrl));
 
         var resp = await fetch(url);
         if (!resp.ok) {
@@ -144,9 +164,10 @@ const MarketData = (function () {
     async function _fetchFromTASE(fundIds) {
         var out = {};
         var promises = fundIds.map(function (id) {
-            var url = _corsProxy
-                ? _corsProxy + 'https://mayaapi.tase.co.il/api/fund/details?fundId=' + encodeURIComponent(id)
-                : '/api/tase/fund?fundId=' + encodeURIComponent(id);
+            var externalUrl = 'https://mayaapi.tase.co.il/api/fund/details?fundId=' + encodeURIComponent(id);
+            var url = _useLocalProxy
+                ? '/api/tase/fund?fundId=' + encodeURIComponent(id)
+                : (_corsProxy ? _corsProxy + externalUrl : _PUBLIC_CORS_PROXY + encodeURIComponent(externalUrl));
 
             return fetch(url).then(function (resp) {
                 if (!resp.ok) return null;
