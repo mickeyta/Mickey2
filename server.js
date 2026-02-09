@@ -36,10 +36,10 @@ function proxyRequest(targetUrl, extraHeaders, res) {
 http.createServer(function (req, res) {
     var url = new URL(req.url, 'http://localhost');
 
-    // Proxy: Yahoo Finance
-    if (url.pathname === '/api/yahoo') {
-        var symbols = url.searchParams.get('symbols') || '';
-        var target = 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' + encodeURIComponent(symbols);
+    // Proxy: Yahoo Finance v8 chart API
+    if (url.pathname.startsWith('/api/yahoo/')) {
+        var symbol = url.pathname.replace('/api/yahoo/', '');
+        var target = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol) + '?range=1d&interval=1d';
         return proxyRequest(target, {}, res);
     }
 

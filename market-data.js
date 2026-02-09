@@ -102,35 +102,47 @@ const MarketData = (function () {
     }
 
     /**
-     * Fetch quotes from Yahoo Finance v7 API.
+     * Fetch quotes from Yahoo Finance v8 chart API (one symbol at a time, in parallel).
+     * The v7 bulk-quote endpoint was deprecated; v8 chart still works.
      * @param {string[]} symbols
      * @returns {Promise<Object>}
      */
     async function _fetchFromYahoo(symbols) {
-        var targetUrl = 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' + encodeURIComponent(symbols.join(','));
-        var url = _corsProxy + encodeURIComponent(targetUrl);
-
-        var resp = await fetch(url);
-        if (!resp.ok) {
-            throw new Error('Market data request failed (HTTP ' + resp.status + ')');
-        }
-
-        var json = await resp.json();
-        var items = (json && json.quoteResponse && json.quoteResponse.result) || [];
         var out = {};
+        var promises = symbols.map(function (sym) {
+            var targetUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
+                encodeURIComponent(sym) + '?range=1d&interval=1d';
+            var url = _corsProxy + encodeURIComponent(targetUrl);
 
-        for (var i = 0; i < items.length; i++) {
-            var q = items[i];
-            out[q.symbol] = {
-                price: q.regularMarketPrice != null ? q.regularMarketPrice : null,
-                previousClose: q.regularMarketPreviousClose != null ? q.regularMarketPreviousClose : null,
-                change: q.regularMarketChange != null ? q.regularMarketChange : null,
-                changePercent: q.regularMarketChangePercent != null ? q.regularMarketChangePercent : null,
-                currency: q.currency || 'USD',
-                name: q.shortName || q.longName || q.symbol,
-            };
-        }
+            return fetch(url).then(function (resp) {
+                if (!resp.ok) return null;
+                return resp.json();
+            }).then(function (json) {
+                if (!json || !json.chart || !json.chart.result || !json.chart.result[0]) return;
+                var meta = json.chart.result[0].meta;
+                var currency = meta.currency || 'USD';
+                // ILA = Israeli Agora; convert to ILS
+                if (currency === 'ILA') currency = 'ILS';
+                var price = meta.regularMarketPrice;
+                // ILA prices are in agorot, convert to ILS
+                if (meta.currency === 'ILA' && price != null) price = price / 100;
+                var prevClose = meta.chartPreviousClose;
+                if (meta.currency === 'ILA' && prevClose != null) prevClose = prevClose / 100;
+                out[sym] = {
+                    price: price != null ? price : null,
+                    previousClose: prevClose != null ? prevClose : null,
+                    change: (price != null && prevClose != null) ? price - prevClose : null,
+                    changePercent: (price != null && prevClose != null && prevClose !== 0)
+                        ? ((price - prevClose) / prevClose) * 100 : null,
+                    currency: currency,
+                    name: meta.shortName || meta.longName || meta.symbol || sym,
+                };
+            }).catch(function () {
+                // Silently ignore individual fetch failures
+            });
+        });
 
+        await Promise.all(promises);
         return out;
     }
 

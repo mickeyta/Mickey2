@@ -648,7 +648,7 @@
             } catch (err) {
                 marketDataLoaded = true;
                 errorEl.textContent = 'Could not fetch market data: ' + err.message +
-                    '. Prices shown as N/A. If blocked by CORS, configure a proxy via MarketData.configure({ corsProxy: "..." }).';
+                    '. Prices shown as N/A.';
                 errorEl.classList.add('visible');
             } finally {
                 btn.textContent = 'Refresh Prices';
