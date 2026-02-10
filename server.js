@@ -88,25 +88,8 @@ http.createServer(async function (req, res) {
         return res.end();
     }
 
-    // Proxy: Yahoo Finance v8 chart API (single)
-    if (url.pathname.startsWith('/api/yahoo/')) {
-        var symbol = url.pathname.replace('/api/yahoo/', '');
-        var target = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
-            encodeURIComponent(symbol) + '?range=1d&interval=1d';
-        try {
-            var r = await httpsGet(target);
-            res.writeHead(r.status, {
-                'Content-Type': r.headers['content-type'] || 'application/json',
-                'Access-Control-Allow-Origin': '*',
-            });
-            res.end(r.body);
-        } catch (err) {
-            sendJson(res, 502, { error: err.message });
-        }
-        return;
-    }
-
     // Yahoo batch: fetch multiple symbols, 3 at a time to avoid rate limits
+    // NOTE: Must be checked BEFORE the single-symbol route (startsWith '/api/yahoo/')
     if (url.pathname === '/api/yahoo/batch') {
         var syms = (url.searchParams.get('symbols') || '').split(',').filter(Boolean);
         if (syms.length === 0) { sendJson(res, 400, { error: 'No symbols' }); return; }
@@ -143,6 +126,24 @@ http.createServer(async function (req, res) {
 
         console.log('[YAHOO BATCH] done in ' + (Date.now() - t0y) + 'ms');
         sendJson(res, 200, batchResult);
+        return;
+    }
+
+    // Proxy: Yahoo Finance v8 chart API (single symbol)
+    if (url.pathname.startsWith('/api/yahoo/')) {
+        var symbol = url.pathname.replace('/api/yahoo/', '');
+        var target = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
+            encodeURIComponent(symbol) + '?range=1d&interval=1d';
+        try {
+            var r = await httpsGet(target);
+            res.writeHead(r.status, {
+                'Content-Type': r.headers['content-type'] || 'application/json',
+                'Access-Control-Allow-Origin': '*',
+            });
+            res.end(r.body);
+        } catch (err) {
+            sendJson(res, 502, { error: err.message });
+        }
         return;
     }
 
