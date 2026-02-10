@@ -132,12 +132,27 @@ const MarketData = (function () {
         return result;
     }
 
-    /** Fetch a single stock quote from Yahoo Finance v8 chart API via CORS proxy. */
+    /** Fetch a single stock quote from Yahoo Finance v8 chart API. Uses local proxy if available, falls back to allorigins. */
     async function _fetchYahooSingle(sym) {
-        var targetUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
-            encodeURIComponent(sym) + '?range=1d&interval=1d';
+        var json = null;
 
-        var json = await _proxiedFetch(targetUrl);
+        // Try local server proxy first (faster and more reliable)
+        try {
+            var localResp = await fetch('/api/yahoo/' + encodeURIComponent(sym));
+            if (localResp.ok) {
+                json = await localResp.json();
+            }
+        } catch (e) {
+            // Local server not running, fall back to CORS proxy
+        }
+
+        // Fall back to allorigins CORS proxy
+        if (!json) {
+            var targetUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
+                encodeURIComponent(sym) + '?range=1d&interval=1d';
+            json = await _proxiedFetch(targetUrl);
+        }
+
         if (!json || !json.chart || !json.chart.result || !json.chart.result[0]) return null;
 
         var meta = json.chart.result[0].meta;
@@ -167,9 +182,18 @@ const MarketData = (function () {
     async function _fetchTASESingle(id) {
         try {
             var resp = await fetch('/api/tase/quote?id=' + encodeURIComponent(id));
-            if (!resp.ok) return null;
+            if (!resp.ok) {
+                console.warn('[TASE] HTTP ' + resp.status + ' for id=' + id);
+                var errText = '';
+                try { errText = await resp.text(); } catch (e2) { /* ignore */ }
+                console.warn('[TASE] Response: ' + errText.substring(0, 200));
+                return null;
+            }
             var data = await resp.json();
-            if (!data || data.error) return null;
+            if (!data || data.error) {
+                console.warn('[TASE] Error for id=' + id + ': ' + (data && data.error || 'empty response'));
+                return null;
+            }
 
             if (data.source === 'tase-security') {
                 // Stock: price is in agorot, convert to ILS
@@ -193,7 +217,7 @@ const MarketData = (function () {
                 };
             }
         } catch (e) {
-            // Local server not running - can't fetch Israeli data
+            console.warn('[TASE] Fetch failed for id=' + id + ': ' + e.message);
         }
         return null;
     }
