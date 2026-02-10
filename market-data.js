@@ -1,8 +1,8 @@
 /**
  * MarketData - Stock market data retrieval service.
  *
- * Fetches current stock prices from Yahoo Finance API and Israeli fund
- * data from the TASE Maya API. Uses a CORS proxy for browser access.
+ * Fetches current stock prices from Yahoo Finance API and Israeli
+ * securities data from the TASE API (via local proxy server).
  *
  * Usage:
  *   const quotes = await MarketData.fetchQuotes(['AAPL', 'MSFT']);
@@ -20,27 +20,19 @@ const MarketData = (function () {
     let _cacheTTL = 5 * 60 * 1000; // 5 minutes
     let _corsProxy = 'https://api.allorigins.win/get?url=';
 
-    /**
-     * Configure the service.
-     * @param {Object} options
-     * @param {number} [options.cacheTTL] - Cache duration in ms (default 5 min)
-     * @param {string} [options.corsProxy] - CORS proxy URL prefix
-     */
     function configure(options) {
         if (options.cacheTTL !== undefined) _cacheTTL = options.cacheTTL;
         if (options.corsProxy !== undefined) _corsProxy = options.corsProxy;
     }
 
-    function _isIsraeliFund(symbol) {
+    /** Israeli security IDs are 5-8 digit numbers */
+    function _isIsraeliSecurity(symbol) {
         return /^\d{5,8}$/.test(symbol);
     }
 
     /**
-     * Fetch a URL through the CORS proxy with retry logic.
-     * Uses the allorigins /get endpoint which wraps the response in JSON.
-     * @param {string} targetUrl
-     * @param {number} [retries]
-     * @returns {Promise<Object|null>} parsed JSON or null on failure
+     * Fetch a URL through the allorigins CORS proxy with retry.
+     * The /get endpoint wraps the response in {contents: "..."}.
      */
     async function _proxiedFetch(targetUrl, retries) {
         if (retries === undefined) retries = 2;
@@ -62,7 +54,7 @@ const MarketData = (function () {
                     }
                     return JSON.parse(wrapper.contents);
                 }
-                // If proxy returns raw JSON (e.g. user configured a different proxy)
+                // If proxy returns raw JSON (user configured a different proxy)
                 return wrapper;
             } catch (e) {
                 // retry
@@ -87,31 +79,31 @@ const MarketData = (function () {
         });
 
         if (stale.length > 0) {
-            var israeliFunds = stale.filter(_isIsraeliFund);
-            var regularSymbols = stale.filter(function (s) { return !_isIsraeliFund(s); });
+            var israeliIds = stale.filter(_isIsraeliSecurity);
+            var yahooSymbols = stale.filter(function (s) { return !_isIsraeliSecurity(s); });
 
             var total = stale.length;
             var done = 0;
-
             function progress() {
                 done++;
                 if (onProgress) onProgress(done, total);
             }
 
-            // Fetch all symbols sequentially to avoid rate limiting
             var fetched = {};
 
-            for (var ri = 0; ri < regularSymbols.length; ri++) {
-                var sym = regularSymbols[ri];
+            // Fetch Yahoo symbols via allorigins CORS proxy
+            for (var ri = 0; ri < yahooSymbols.length; ri++) {
+                var sym = yahooSymbols[ri];
                 var quote = await _fetchYahooSingle(sym);
                 if (quote) fetched[sym] = quote;
                 progress();
             }
 
-            for (var fi = 0; fi < israeliFunds.length; fi++) {
-                var fid = israeliFunds[fi];
-                var fquote = await _fetchTASESingle(fid);
-                if (fquote) fetched[fid] = fquote;
+            // Fetch Israeli securities via local server proxy
+            for (var fi = 0; fi < israeliIds.length; fi++) {
+                var id = israeliIds[fi];
+                var iquote = await _fetchTASESingle(id);
+                if (iquote) fetched[id] = iquote;
                 progress();
             }
 
@@ -140,9 +132,7 @@ const MarketData = (function () {
         return result;
     }
 
-    /**
-     * Fetch a single stock quote from Yahoo Finance v8 chart API.
-     */
+    /** Fetch a single stock quote from Yahoo Finance v8 chart API via CORS proxy. */
     async function _fetchYahooSingle(sym) {
         var targetUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
             encodeURIComponent(sym) + '?range=1d&interval=1d';
@@ -170,23 +160,42 @@ const MarketData = (function () {
     }
 
     /**
-     * Fetch a single Israeli fund quote from TASE Maya API.
+     * Fetch a single Israeli security from the local TASE proxy.
+     * The server tries the stock endpoint first, then the fund endpoint.
+     * Requires running: node server.js
      */
     async function _fetchTASESingle(id) {
-        var targetUrl = 'https://mayaapi.tase.co.il/api/fund/details?fundId=' + encodeURIComponent(id);
+        try {
+            var resp = await fetch('/api/tase/quote?id=' + encodeURIComponent(id));
+            if (!resp.ok) return null;
+            var data = await resp.json();
+            if (!data || data.error) return null;
 
-        var data = await _proxiedFetch(targetUrl);
-        if (!data || data.UnitValuePrice == null) return null;
-
-        var priceILS = data.UnitValuePrice / 100;
-        return {
-            price: priceILS,
-            previousClose: null,
-            change: null,
-            changePercent: data.DayYield != null ? data.DayYield : null,
-            currency: 'ILS',
-            name: data.FundLongName || data.FundShortName || id,
-        };
+            if (data.source === 'tase-security') {
+                // Stock: price is in agorot, convert to ILS
+                return {
+                    price: data.price != null ? data.price / 100 : null,
+                    previousClose: null,
+                    change: null,
+                    changePercent: null,
+                    currency: 'ILS',
+                    name: data.name || id,
+                };
+            } else if (data.source === 'tase-fund') {
+                // Fund: UnitValuePrice is in agorot, convert to ILS
+                return {
+                    price: data.price != null ? data.price / 100 : null,
+                    previousClose: null,
+                    change: null,
+                    changePercent: data.dayYield != null ? data.dayYield : null,
+                    currency: 'ILS',
+                    name: data.name || id,
+                };
+            }
+        } catch (e) {
+            // Local server not running - can't fetch Israeli data
+        }
+        return null;
     }
 
     function getCached(symbol) {
