@@ -432,6 +432,15 @@
                     <button id="refreshPrices" class="btn btn-secondary btn-small">Refresh Prices</button>
                 </div>
             </div>
+            <div id="progressArea" style="display:none; padding: 8px 16px;">
+                <div style="display:flex; align-items:center; gap:10px; font-size:13px; color:#8892b0;">
+                    <span id="progressText">Loading...</span>
+                    <div style="flex:1; height:6px; background:#1a1f36; border-radius:3px; overflow:hidden;">
+                        <div id="progressBar" style="height:100%; width:0%; background:linear-gradient(90deg,#00d4ff,#7b2ff7); border-radius:3px; transition:width 0.2s;"></div>
+                    </div>
+                    <span id="progressCount" style="min-width:45px; text-align:right;">0/0</span>
+                </div>
+            </div>
             <div id="marketError" class="market-error"></div>
             <div id="portfolioContainer">
                 <div class="table-wrapper">
@@ -634,14 +643,25 @@
             const symbols = portfolio.map(s => s.name);
             const btn = document.getElementById('refreshPrices');
             const errorEl = document.getElementById('marketError');
+            const progressArea = document.getElementById('progressArea');
+            const progressBar = document.getElementById('progressBar');
+            const progressText = document.getElementById('progressText');
+            const progressCount = document.getElementById('progressCount');
 
-            btn.innerHTML = '<span class="loading-spinner"></span>Loading...';
+            btn.innerHTML = '<span class="loading-spinner"></span>Fetching...';
             btn.disabled = true;
             errorEl.classList.remove('visible');
+            progressArea.style.display = 'block';
+            progressBar.style.width = '0%';
+            progressText.textContent = 'Starting...';
+            progressCount.textContent = '0/' + symbols.length;
 
             try {
-                await MarketData.fetchQuotes(symbols, function(done, total) {
-                    btn.innerHTML = '<span class="loading-spinner"></span>Loading ' + done + '/' + total + '...';
+                await MarketData.fetchQuotes(symbols, function(done, total, sym) {
+                    var pct = Math.round((done / total) * 100);
+                    progressBar.style.width = pct + '%';
+                    progressCount.textContent = done + '/' + total;
+                    progressText.textContent = done < total ? sym : 'Done';
                     renderPortfolio();
                 });
                 marketDataLoaded = true;
@@ -656,6 +676,7 @@
             } finally {
                 btn.textContent = 'Refresh Prices';
                 btn.disabled = false;
+                progressArea.style.display = 'none';
                 renderPortfolio();
             }
         }

@@ -66,7 +66,7 @@ const MarketData = (function () {
     /**
      * Fetch current quotes for the given stock symbols.
      * @param {string[]} symbols
-     * @param {Function} [onProgress] - callback(fetched, total)
+     * @param {Function} [onProgress] - callback(fetched, total, symbol)
      * @returns {Promise<Object.<string, QuoteData|null>>}
      */
     async function fetchQuotes(symbols, onProgress) {
@@ -84,32 +84,41 @@ const MarketData = (function () {
 
             var total = stale.length;
             var done = 0;
-            function progress() {
-                done++;
-                if (onProgress) onProgress(done, total);
-            }
-
             var fetched = {};
 
-            // Fetch Yahoo symbols via allorigins CORS proxy
-            for (var ri = 0; ri < yahooSymbols.length; ri++) {
-                var sym = yahooSymbols[ri];
-                var quote = await _fetchYahooSingle(sym);
-                if (quote) fetched[sym] = quote;
-                progress();
+            function progress(sym) {
+                done++;
+                if (onProgress) onProgress(done, total, sym);
             }
 
-            // Fetch all Israeli securities in one batch (parallel on server)
+            // Fire ALL Yahoo fetches in parallel, report progress as each completes
+            var yahooPromises = yahooSymbols.map(function (sym) {
+                return _fetchYahooSingle(sym).then(function (quote) {
+                    if (quote) fetched[sym] = quote;
+                    progress(sym);
+                }).catch(function () { progress(sym); });
+            });
+
+            // Fire Israeli batch in parallel with Yahoo
+            var tasePromise = null;
             if (israeliIds.length > 0) {
-                var batchData = await _fetchTASEBatch(israeliIds);
-                for (var fi = 0; fi < israeliIds.length; fi++) {
-                    var id = israeliIds[fi];
-                    if (batchData && batchData[id]) {
-                        fetched[id] = _parseTASEResult(id, batchData[id]);
+                tasePromise = _fetchTASEBatch(israeliIds).then(function (batchData) {
+                    for (var fi = 0; fi < israeliIds.length; fi++) {
+                        var id = israeliIds[fi];
+                        if (batchData && batchData[id]) {
+                            fetched[id] = _parseTASEResult(id, batchData[id]);
+                        }
+                        progress(id);
                     }
-                    progress();
-                }
+                }).catch(function () {
+                    for (var fi = 0; fi < israeliIds.length; fi++) {
+                        progress(israeliIds[fi]);
+                    }
+                });
             }
+
+            // Wait for everything
+            await Promise.all(yahooPromises.concat(tasePromise ? [tasePromise] : []));
 
             var ts = Date.now();
             for (var sym2 in fetched) {
