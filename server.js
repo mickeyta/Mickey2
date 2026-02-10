@@ -88,7 +88,7 @@ http.createServer(async function (req, res) {
         return res.end();
     }
 
-    // Proxy: Yahoo Finance v8 chart API
+    // Proxy: Yahoo Finance v8 chart API (single)
     if (url.pathname.startsWith('/api/yahoo/')) {
         var symbol = url.pathname.replace('/api/yahoo/', '');
         var target = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
@@ -103,6 +103,46 @@ http.createServer(async function (req, res) {
         } catch (err) {
             sendJson(res, 502, { error: err.message });
         }
+        return;
+    }
+
+    // Yahoo batch: fetch multiple symbols, 3 at a time to avoid rate limits
+    if (url.pathname === '/api/yahoo/batch') {
+        var syms = (url.searchParams.get('symbols') || '').split(',').filter(Boolean);
+        if (syms.length === 0) { sendJson(res, 400, { error: 'No symbols' }); return; }
+        console.log('[YAHOO BATCH] symbols=' + syms.join(','));
+        var t0y = Date.now();
+        var batchResult = {};
+        var CONCURRENCY = 3;
+
+        for (var ci = 0; ci < syms.length; ci += CONCURRENCY) {
+            var chunk = syms.slice(ci, ci + CONCURRENCY);
+            var chunkResults = await Promise.allSettled(chunk.map(function (s) {
+                var tgt = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
+                    encodeURIComponent(s) + '?range=1d&interval=1d';
+                return httpsGet(tgt, {}, 8000).then(function (r) {
+                    return { symbol: s, status: r.status, body: r.body.toString() };
+                });
+            }));
+            for (var cr = 0; cr < chunkResults.length; cr++) {
+                var sym = chunk[cr];
+                if (chunkResults[cr].status === 'fulfilled') {
+                    var val = chunkResults[cr].value;
+                    if (val.status === 200) {
+                        try { batchResult[sym] = JSON.parse(val.body); } catch (e) { batchResult[sym] = null; }
+                    } else {
+                        console.log('  ' + sym + ': HTTP ' + val.status);
+                        batchResult[sym] = null;
+                    }
+                } else {
+                    console.log('  ' + sym + ': ' + chunkResults[cr].reason.message);
+                    batchResult[sym] = null;
+                }
+            }
+        }
+
+        console.log('[YAHOO BATCH] done in ' + (Date.now() - t0y) + 'ms');
+        sendJson(res, 200, batchResult);
         return;
     }
 

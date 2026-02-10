@@ -30,37 +30,25 @@ const MarketData = (function () {
         return /^\d{5,8}$/.test(symbol);
     }
 
-    /**
-     * Fetch a URL through the allorigins CORS proxy with retry.
-     * The /get endpoint wraps the response in {contents: "..."}.
-     */
-    async function _proxiedFetch(targetUrl, retries) {
-        if (retries === undefined) retries = 2;
-        var url = _corsProxy + encodeURIComponent(targetUrl);
-
-        for (var attempt = 0; attempt <= retries; attempt++) {
-            try {
-                if (attempt > 0) {
-                    await new Promise(function (r) { setTimeout(r, 1000 * attempt); });
-                }
-                var resp = await fetch(url);
-                if (!resp.ok) continue;
-
-                var wrapper = await resp.json();
-                // allorigins /get returns {contents: "...", status: {http_code: N}}
-                if (wrapper && wrapper.contents !== undefined) {
-                    if (wrapper.status && wrapper.status.http_code && wrapper.status.http_code >= 400) {
-                        continue;
-                    }
-                    return JSON.parse(wrapper.contents);
-                }
-                // If proxy returns raw JSON (user configured a different proxy)
-                return wrapper;
-            } catch (e) {
-                // retry
-            }
-        }
-        return null;
+    /** Parse Yahoo v8 chart JSON into a quote object */
+    function _parseYahooChart(json, sym) {
+        if (!json || !json.chart || !json.chart.result || !json.chart.result[0]) return null;
+        var meta = json.chart.result[0].meta;
+        var currency = meta.currency || 'USD';
+        if (currency === 'ILA') currency = 'ILS';
+        var price = meta.regularMarketPrice;
+        if (meta.currency === 'ILA' && price != null) price = price / 100;
+        var prevClose = meta.chartPreviousClose;
+        if (meta.currency === 'ILA' && prevClose != null) prevClose = prevClose / 100;
+        return {
+            price: price != null ? price : null,
+            previousClose: prevClose != null ? prevClose : null,
+            change: (price != null && prevClose != null) ? price - prevClose : null,
+            changePercent: (price != null && prevClose != null && prevClose !== 0)
+                ? ((price - prevClose) / prevClose) * 100 : null,
+            currency: currency,
+            name: meta.shortName || meta.longName || meta.symbol || sym,
+        };
     }
 
     /**
@@ -91,15 +79,26 @@ const MarketData = (function () {
                 if (onProgress) onProgress(done, total, sym);
             }
 
-            // Fire ALL Yahoo fetches in parallel, report progress as each completes
-            var yahooPromises = yahooSymbols.map(function (sym) {
-                return _fetchYahooSingle(sym).then(function (quote) {
-                    if (quote) fetched[sym] = quote;
-                    progress(sym);
-                }).catch(function () { progress(sym); });
-            });
+            // Fire Yahoo batch + TASE batch in parallel
+            var yahooDone = false;
+            var yahooPromise = null;
+            if (yahooSymbols.length > 0) {
+                yahooPromise = _fetchYahooBatch(yahooSymbols).then(function (batchData) {
+                    for (var ri = 0; ri < yahooSymbols.length; ri++) {
+                        var sym = yahooSymbols[ri];
+                        if (batchData && batchData[sym]) {
+                            var q = _parseYahooChart(batchData[sym], sym);
+                            if (q) fetched[sym] = q;
+                        }
+                        progress(sym);
+                    }
+                }).catch(function () {
+                    for (var ri = 0; ri < yahooSymbols.length; ri++) {
+                        progress(yahooSymbols[ri]);
+                    }
+                });
+            }
 
-            // Fire Israeli batch in parallel with Yahoo
             var tasePromise = null;
             if (israeliIds.length > 0) {
                 tasePromise = _fetchTASEBatch(israeliIds).then(function (batchData) {
@@ -118,7 +117,7 @@ const MarketData = (function () {
             }
 
             // Wait for everything
-            await Promise.all(yahooPromises.concat(tasePromise ? [tasePromise] : []));
+            await Promise.all([yahooPromise, tasePromise].filter(Boolean));
 
             var ts = Date.now();
             for (var sym2 in fetched) {
@@ -145,46 +144,22 @@ const MarketData = (function () {
         return result;
     }
 
-    /** Fetch a single stock quote from Yahoo Finance v8 chart API. Uses local proxy if available, falls back to allorigins. */
-    async function _fetchYahooSingle(sym) {
-        var json = null;
-
-        // Try local server proxy first (faster and more reliable)
+    /**
+     * Fetch all Yahoo symbols in one batch via local server proxy.
+     * Server throttles to 3-at-a-time to avoid Yahoo rate limits.
+     */
+    async function _fetchYahooBatch(syms) {
         try {
-            var localResp = await fetch('/api/yahoo/' + encodeURIComponent(sym));
-            if (localResp.ok) {
-                json = await localResp.json();
+            var resp = await fetch('/api/yahoo/batch?symbols=' + syms.map(encodeURIComponent).join(','));
+            if (!resp.ok) {
+                console.warn('[Yahoo] Batch HTTP ' + resp.status);
+                return null;
             }
+            return await resp.json();
         } catch (e) {
-            // Local server not running, fall back to CORS proxy
+            console.warn('[Yahoo] Batch failed: ' + e.message);
+            return null;
         }
-
-        // Fall back to allorigins CORS proxy
-        if (!json) {
-            var targetUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
-                encodeURIComponent(sym) + '?range=1d&interval=1d';
-            json = await _proxiedFetch(targetUrl);
-        }
-
-        if (!json || !json.chart || !json.chart.result || !json.chart.result[0]) return null;
-
-        var meta = json.chart.result[0].meta;
-        var currency = meta.currency || 'USD';
-        if (currency === 'ILA') currency = 'ILS';
-        var price = meta.regularMarketPrice;
-        if (meta.currency === 'ILA' && price != null) price = price / 100;
-        var prevClose = meta.chartPreviousClose;
-        if (meta.currency === 'ILA' && prevClose != null) prevClose = prevClose / 100;
-
-        return {
-            price: price != null ? price : null,
-            previousClose: prevClose != null ? prevClose : null,
-            change: (price != null && prevClose != null) ? price - prevClose : null,
-            changePercent: (price != null && prevClose != null && prevClose !== 0)
-                ? ((price - prevClose) / prevClose) * 100 : null,
-            currency: currency,
-            name: meta.shortName || meta.longName || meta.symbol || sym,
-        };
     }
 
     /**

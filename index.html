@@ -652,23 +652,42 @@
             btn.disabled = true;
             errorEl.classList.remove('visible');
             progressArea.style.display = 'block';
-            progressBar.style.width = '0%';
-            progressText.textContent = 'Starting...';
+            progressBar.style.width = '5%';
+            progressText.textContent = 'Fetching ' + symbols.length + ' symbols...';
             progressCount.textContent = '0/' + symbols.length;
+
+            // Animate progress bar while waiting
+            var lastDone = 0;
+            var pulseInterval = setInterval(function () {
+                if (lastDone === 0) {
+                    // Pulse between 5-30% while waiting for first results
+                    var cur = parseFloat(progressBar.style.width) || 5;
+                    cur += 2;
+                    if (cur > 30) cur = 5;
+                    progressBar.style.width = cur + '%';
+                }
+            }, 300);
 
             try {
                 await MarketData.fetchQuotes(symbols, function(done, total, sym) {
+                    lastDone = done;
                     var pct = Math.round((done / total) * 100);
                     progressBar.style.width = pct + '%';
                     progressCount.textContent = done + '/' + total;
-                    progressText.textContent = done < total ? sym : 'Done';
+                    if (done >= total) {
+                        progressText.textContent = 'Done!';
+                    } else {
+                        progressText.textContent = sym;
+                    }
                     renderPortfolio();
                 });
+                clearInterval(pulseInterval);
                 marketDataLoaded = true;
                 const now = new Date();
                 document.getElementById('lastUpdated').textContent =
                     'Updated ' + now.toLocaleTimeString();
             } catch (err) {
+                clearInterval(pulseInterval);
                 marketDataLoaded = true;
                 errorEl.textContent = 'Could not fetch market data: ' + err.message +
                     '. Prices shown as N/A.';
