@@ -2,7 +2,10 @@
  * MarketData - Stock market data retrieval service.
  *
  * Fetches current stock prices from Yahoo Finance API and Israeli
- * securities data from the TASE API (via local proxy server).
+ * securities data from the TASE API.
+ *
+ * Tries local server proxy first (/api/* endpoints), falls back to
+ * CORS proxy (allorigins.win) if the server isn't available.
  *
  * Usage:
  *   const quotes = await MarketData.fetchQuotes(['AAPL', 'MSFT']);
@@ -52,6 +55,37 @@ const MarketData = (function () {
     }
 
     /**
+     * Fetch a URL through the allorigins CORS proxy with retry.
+     * The /get endpoint wraps the response in {contents: "..."}.
+     */
+    async function _proxiedFetch(targetUrl, retries) {
+        if (retries === undefined) retries = 2;
+        var url = _corsProxy + encodeURIComponent(targetUrl);
+
+        for (var attempt = 0; attempt <= retries; attempt++) {
+            try {
+                if (attempt > 0) {
+                    await new Promise(function (r) { setTimeout(r, 1000 * attempt); });
+                }
+                var resp = await fetch(url);
+                if (!resp.ok) continue;
+
+                var wrapper = await resp.json();
+                if (wrapper && wrapper.contents !== undefined) {
+                    if (wrapper.status && wrapper.status.http_code && wrapper.status.http_code >= 400) {
+                        continue;
+                    }
+                    return JSON.parse(wrapper.contents);
+                }
+                return wrapper;
+            } catch (e) {
+                // retry
+            }
+        }
+        return null;
+    }
+
+    /**
      * Fetch current quotes for the given stock symbols.
      * @param {string[]} symbols
      * @param {Function} [onProgress] - callback(fetched, total, symbol)
@@ -79,16 +113,14 @@ const MarketData = (function () {
                 if (onProgress) onProgress(done, total, sym);
             }
 
-            // Fire Yahoo batch + TASE batch in parallel
-            var yahooDone = false;
+            // Fire Yahoo + TASE in parallel
             var yahooPromise = null;
             if (yahooSymbols.length > 0) {
-                yahooPromise = _fetchYahooBatch(yahooSymbols).then(function (batchData) {
+                yahooPromise = _fetchYahooSymbols(yahooSymbols).then(function (results) {
                     for (var ri = 0; ri < yahooSymbols.length; ri++) {
                         var sym = yahooSymbols[ri];
-                        if (batchData && batchData[sym]) {
-                            var q = _parseYahooChart(batchData[sym], sym);
-                            if (q) fetched[sym] = q;
+                        if (results && results[sym]) {
+                            fetched[sym] = results[sym];
                         }
                         progress(sym);
                     }
@@ -101,11 +133,11 @@ const MarketData = (function () {
 
             var tasePromise = null;
             if (israeliIds.length > 0) {
-                tasePromise = _fetchTASEBatch(israeliIds).then(function (batchData) {
+                tasePromise = _fetchTASESymbols(israeliIds).then(function (results) {
                     for (var fi = 0; fi < israeliIds.length; fi++) {
                         var id = israeliIds[fi];
-                        if (batchData && batchData[id]) {
-                            fetched[id] = _parseTASEResult(id, batchData[id]);
+                        if (results && results[id]) {
+                            fetched[id] = results[id];
                         }
                         progress(id);
                     }
@@ -116,7 +148,6 @@ const MarketData = (function () {
                 });
             }
 
-            // Wait for everything
             await Promise.all([yahooPromise, tasePromise].filter(Boolean));
 
             var ts = Date.now();
@@ -145,42 +176,90 @@ const MarketData = (function () {
     }
 
     /**
-     * Fetch all Yahoo symbols in one batch via local server proxy.
-     * Server throttles to 3-at-a-time to avoid Yahoo rate limits.
+     * Fetch Yahoo symbols: try local batch endpoint, fall back to CORS proxy.
+     * Returns { SYMBOL: quoteObject, ... }
      */
-    async function _fetchYahooBatch(syms) {
+    async function _fetchYahooSymbols(syms) {
+        // Try local server batch endpoint first
         try {
             var resp = await fetch('/api/yahoo/batch?symbols=' + syms.map(encodeURIComponent).join(','));
-            if (!resp.ok) {
-                console.warn('[Yahoo] Batch HTTP ' + resp.status);
-                return null;
+            if (resp.ok) {
+                var batchData = await resp.json();
+                var out = {};
+                for (var i = 0; i < syms.length; i++) {
+                    var sym = syms[i];
+                    if (batchData && batchData[sym]) {
+                        var q = _parseYahooChart(batchData[sym], sym);
+                        if (q) out[sym] = q;
+                    }
+                }
+                return out;
             }
-            return await resp.json();
         } catch (e) {
-            console.warn('[Yahoo] Batch failed: ' + e.message);
-            return null;
+            // Server not available
         }
+
+        // Fall back to individual CORS-proxied fetches
+        console.log('[Yahoo] Falling back to CORS proxy');
+        var out = {};
+        var promises = syms.map(function (sym) {
+            var targetUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
+                encodeURIComponent(sym) + '?range=1d&interval=1d';
+            return _proxiedFetch(targetUrl).then(function (json) {
+                var q = _parseYahooChart(json, sym);
+                if (q) out[sym] = q;
+            }).catch(function () {});
+        });
+        await Promise.all(promises);
+        return out;
     }
 
     /**
-     * Fetch all Israeli securities in one batch request.
-     * Server fires all TASE API calls in parallel and returns results.
+     * Fetch TASE symbols: try local batch endpoint, fall back to CORS proxy.
+     * Returns { ID: quoteObject, ... }
      */
-    async function _fetchTASEBatch(ids) {
+    async function _fetchTASESymbols(ids) {
+        // Try local server batch endpoint first
         try {
             var resp = await fetch('/api/tase/batch?ids=' + ids.map(encodeURIComponent).join(','));
-            if (!resp.ok) {
-                console.warn('[TASE] Batch HTTP ' + resp.status);
-                return null;
+            if (resp.ok) {
+                var batchData = await resp.json();
+                var out = {};
+                for (var i = 0; i < ids.length; i++) {
+                    var id = ids[i];
+                    if (batchData && batchData[id]) {
+                        var q = _parseTASEResult(id, batchData[id]);
+                        if (q) out[id] = q;
+                    }
+                }
+                return out;
             }
-            return await resp.json();
         } catch (e) {
-            console.warn('[TASE] Batch failed: ' + e.message);
-            return null;
+            // Server not available
         }
+
+        // Fall back to individual CORS-proxied fetches (fund endpoint)
+        console.log('[TASE] Falling back to CORS proxy');
+        var out = {};
+        var promises = ids.map(function (id) {
+            var targetUrl = 'https://mayaapi.tase.co.il/api/fund/details?fundId=' + encodeURIComponent(id);
+            return _proxiedFetch(targetUrl).then(function (data) {
+                if (!data || data.UnitValuePrice == null) return;
+                out[id] = {
+                    price: data.UnitValuePrice / 100,  // agorot to ILS
+                    previousClose: null,
+                    change: null,
+                    changePercent: data.DayYield != null ? data.DayYield : null,
+                    currency: 'ILS',
+                    name: data.FundLongName || data.FundShortName || id,
+                };
+            }).catch(function () {});
+        });
+        await Promise.all(promises);
+        return out;
     }
 
-    /** Convert a TASE batch result item to a quote object */
+    /** Convert a TASE batch result item (from server proxy) to a quote object */
     function _parseTASEResult(id, data) {
         if (!data || !data.price) return null;
         return {
