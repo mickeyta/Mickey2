@@ -640,7 +640,10 @@
             errorEl.classList.remove('visible');
 
             try {
-                await MarketData.fetchQuotes(symbols);
+                await MarketData.fetchQuotes(symbols, function(done, total) {
+                    btn.innerHTML = '<span class="loading-spinner"></span>Loading ' + done + '/' + total + '...';
+                    renderPortfolio();
+                });
                 marketDataLoaded = true;
                 const now = new Date();
                 document.getElementById('lastUpdated').textContent =
