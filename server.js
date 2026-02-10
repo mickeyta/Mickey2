@@ -125,6 +125,7 @@ function sendJson(res, status, data) {
 }
 
 http.createServer(async function (req, res) {
+  try {
     var url = new URL(req.url, 'http://localhost');
 
     // CORS preflight
@@ -231,20 +232,28 @@ http.createServer(async function (req, res) {
         return;
     }
 
+    // Simple ping to verify server is running
+    if (url.pathname === '/api/ping') {
+        sendJson(res, 200, { ok: true, time: new Date().toISOString() });
+        return;
+    }
+
     // Diagnostic endpoint: test TASE APIs directly and report status
     if (url.pathname === '/api/tase/test') {
         var testId = url.searchParams.get('id') || '507012';
-        var results = { testId: testId, stock: {}, fund: {} };
+        var results = { testId: testId, stock: {}, fund: {}, timestamp: new Date().toISOString() };
 
-        // Test stock endpoint
+        // Test stock endpoint with short timeout
         try {
             var sUrl = 'https://api.tase.co.il/api/company/securitydata?securityId=' +
                 encodeURIComponent(testId) + '&lang=1';
-            var sResp = await httpsGet(sUrl, TASE_STOCK_HEADERS);
+            console.log('[TEST] Testing stock endpoint for id=' + testId);
+            var sResp = await httpsGet(sUrl, TASE_STOCK_HEADERS, 8000);
             var sBody = sResp.body.toString();
             results.stock = {
                 status: sResp.status,
                 isJson: sBody.length > 0 && sBody[0] === '{',
+                bodyLength: sBody.length,
                 bodyPreview: sBody.substring(0, 300),
                 contentType: sResp.headers['content-type'],
             };
@@ -253,20 +262,24 @@ http.createServer(async function (req, res) {
                     var parsed = JSON.parse(sBody);
                     results.stock.name = parsed.Name;
                     results.stock.lastRate = parsed.LastRate;
-                } catch (e) { /* ignore */ }
+                } catch (e) { results.stock.parseError = e.message; }
             }
+            console.log('[TEST] Stock result: status=' + sResp.status + ' isJson=' + results.stock.isJson);
         } catch (e) {
             results.stock = { error: e.message };
+            console.log('[TEST] Stock error: ' + e.message);
         }
 
-        // Test fund endpoint
+        // Test fund endpoint with short timeout
         try {
             var fUrl = 'https://mayaapi.tase.co.il/api/fund/details?fundId=' + encodeURIComponent(testId);
-            var fResp = await httpsGet(fUrl, TASE_FUND_HEADERS);
+            console.log('[TEST] Testing fund endpoint for id=' + testId);
+            var fResp = await httpsGet(fUrl, TASE_FUND_HEADERS, 8000);
             var fBody = fResp.body.toString();
             results.fund = {
                 status: fResp.status,
                 isJson: fBody.length > 0 && fBody[0] === '{',
+                bodyLength: fBody.length,
                 bodyPreview: fBody.substring(0, 300),
                 contentType: fResp.headers['content-type'],
             };
@@ -275,10 +288,12 @@ http.createServer(async function (req, res) {
                     var parsed2 = JSON.parse(fBody);
                     results.fund.name = parsed2.FundShortName;
                     results.fund.unitPrice = parsed2.UnitValuePrice;
-                } catch (e) { /* ignore */ }
+                } catch (e) { results.fund.parseError = e.message; }
             }
+            console.log('[TEST] Fund result: status=' + fResp.status + ' isJson=' + results.fund.isJson);
         } catch (e) {
             results.fund = { error: e.message };
+            console.log('[TEST] Fund error: ' + e.message);
         }
 
         sendJson(res, 200, results);
@@ -304,6 +319,10 @@ http.createServer(async function (req, res) {
         res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
         res.end(data);
     });
+  } catch (err) {
+    console.error('[SERVER] Unhandled error: ' + err.message);
+    try { sendJson(res, 500, { error: 'Internal server error: ' + err.message }); } catch (e2) { /* ignore */ }
+  }
 }).listen(PORT, '0.0.0.0', function () {
     console.log('Server running at http://localhost:' + PORT);
     console.log('  Open in browser: http://localhost:' + PORT);
