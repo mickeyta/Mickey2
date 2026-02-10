@@ -15,7 +15,6 @@ const MIME = {
     '.ico': 'image/x-icon',
 };
 
-// Full browser-like headers to bypass Incapsula bot detection
 const TASE_STOCK_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/plain, */*',
@@ -37,17 +36,8 @@ const TASE_FUND_HEADERS = {
     'X-Maya-With': 'allow',
 };
 
-// Legacy IE6 User-Agent as fallback (sometimes bypasses bot protection)
-const TASE_LEGACY_HEADERS = {
-    'User-Agent': 'Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; FSL 7.0.6.01001)',
-    'Accept': 'application/json, text/plain, */*',
-    'Accept-Language': 'en-US',
-    'Cache-Control': 'no-cache',
-    'Referer': 'https://www.tase.co.il/',
-};
-
 function httpsGet(targetUrl, headers, timeout) {
-    if (!timeout) timeout = 15000;
+    if (!timeout) timeout = 10000;
     return new Promise(function (resolve, reject) {
         var parsedUrl = new URL(targetUrl);
         var options = {
@@ -56,7 +46,6 @@ function httpsGet(targetUrl, headers, timeout) {
             path: parsedUrl.pathname + parsedUrl.search,
             method: 'GET',
             headers: headers || {},
-            rejectUnauthorized: true,
         };
         var req = https.request(options, function (upstream) {
             var chunks = [];
@@ -67,56 +56,18 @@ function httpsGet(targetUrl, headers, timeout) {
         });
         req.on('error', reject);
         req.setTimeout(timeout, function () {
-            req.destroy(new Error('Request timed out after ' + timeout + 'ms'));
+            req.destroy(new Error('Timeout ' + timeout + 'ms'));
         });
         req.end();
     });
 }
 
-/** Try a request with primary headers, then retry with legacy headers on failure */
-async function httpsGetWithRetry(targetUrl, primaryHeaders, fallbackHeaders) {
-    // Attempt 1: primary headers
-    try {
-        var r = await httpsGet(targetUrl, primaryHeaders);
-        var body = r.body.toString();
-        // Incapsula returns HTML challenge pages (not JSON) on block
-        if (r.status === 200 && body.length > 0 && body[0] === '{') {
-            return r;
-        }
-        console.log('  [attempt 1] status=' + r.status + ' bodyStart=' + body.substring(0, 120).replace(/\n/g, ' '));
-    } catch (e) {
-        console.log('  [attempt 1] error: ' + e.message);
-    }
-
-    // Attempt 2: fallback legacy headers
-    if (fallbackHeaders) {
-        try {
-            await new Promise(function (r) { setTimeout(r, 500); });
-            var r2 = await httpsGet(targetUrl, fallbackHeaders);
-            var body2 = r2.body.toString();
-            if (r2.status === 200 && body2.length > 0 && body2[0] === '{') {
-                return r2;
-            }
-            console.log('  [attempt 2] status=' + r2.status + ' bodyStart=' + body2.substring(0, 120).replace(/\n/g, ' '));
-        } catch (e) {
-            console.log('  [attempt 2] error: ' + e.message);
-        }
-    }
-
-    // Attempt 3: retry primary headers after a longer delay
-    try {
-        await new Promise(function (r) { setTimeout(r, 2000); });
-        var r3 = await httpsGet(targetUrl, primaryHeaders);
-        var body3 = r3.body.toString();
-        if (r3.status === 200 && body3.length > 0 && body3[0] === '{') {
-            return r3;
-        }
-        console.log('  [attempt 3] status=' + r3.status + ' bodyStart=' + body3.substring(0, 120).replace(/\n/g, ' '));
-    } catch (e) {
-        console.log('  [attempt 3] error: ' + e.message);
-    }
-
-    return null;
+/** Try to parse a TASE response. Returns parsed JSON if valid, null otherwise. */
+function parseTaseResponse(resp) {
+    if (!resp || resp.status !== 200) return null;
+    var body = resp.body.toString();
+    if (!body || body[0] !== '{') return null; // HTML = Incapsula block
+    try { return JSON.parse(body); } catch (e) { return null; }
 }
 
 function sendJson(res, status, data) {
@@ -128,7 +79,6 @@ http.createServer(async function (req, res) {
   try {
     var url = new URL(req.url, 'http://localhost');
 
-    // CORS preflight
     if (req.method === 'OPTIONS') {
         res.writeHead(204, {
             'Access-Control-Allow-Origin': '*',
@@ -156,146 +106,153 @@ http.createServer(async function (req, res) {
         return;
     }
 
-    // Proxy: TASE unified quote - tries stock endpoint first, then fund endpoint
+    // Proxy: TASE quote - tries BOTH stock and fund endpoints IN PARALLEL for speed
     if (url.pathname === '/api/tase/quote') {
         var id = url.searchParams.get('id') || '';
-        console.log('[TASE] Fetching quote for id=' + id);
+        var t0 = Date.now();
+        console.log('[TASE] id=' + id);
 
-        try {
-            // Try stock/security endpoint first
-            var secUrl = 'https://api.tase.co.il/api/company/securitydata?securityId=' +
-                encodeURIComponent(id) + '&lang=1';
-            console.log('  Trying stock endpoint: ' + secUrl);
+        var secUrl = 'https://api.tase.co.il/api/company/securitydata?securityId=' +
+            encodeURIComponent(id) + '&lang=1';
+        var fundUrl = 'https://mayaapi.tase.co.il/api/fund/details?fundId=' +
+            encodeURIComponent(id);
 
-            var secResp = await httpsGetWithRetry(secUrl, TASE_STOCK_HEADERS, TASE_LEGACY_HEADERS);
+        // Fire both requests in parallel with 5s timeout
+        var results = await Promise.allSettled([
+            httpsGet(secUrl, TASE_STOCK_HEADERS, 5000),
+            httpsGet(fundUrl, TASE_FUND_HEADERS, 5000),
+        ]);
 
-            if (secResp && secResp.status === 200) {
-                var secBody = secResp.body.toString();
-                if (secBody && secBody !== 'null' && secBody[0] === '{') {
-                    try {
-                        var secData = JSON.parse(secBody);
-                        if (secData && secData.LastRate != null) {
-                            console.log('  => Stock found: ' + (secData.Name || id) + ' price=' + secData.LastRate);
-                            sendJson(res, 200, {
-                                source: 'tase-security',
-                                price: secData.LastRate,
-                                name: secData.LongName || secData.Name || id,
-                                type: secData.Type,
-                                symbol: secData.Symbol,
-                                change: secData.Change,
-                                monthYield: secData.MonthYield,
-                                annualYield: secData.AnnualYield,
-                            });
-                            return;
-                        }
-                    } catch (parseErr) {
-                        console.log('  Stock JSON parse error: ' + parseErr.message);
-                    }
-                }
-            }
+        var secData = parseTaseResponse(results[0].status === 'fulfilled' ? results[0].value : null);
+        var fundData = parseTaseResponse(results[1].status === 'fulfilled' ? results[1].value : null);
 
-            // Fall back to fund endpoint
-            var fundUrl = 'https://mayaapi.tase.co.il/api/fund/details?fundId=' + encodeURIComponent(id);
-            console.log('  Trying fund endpoint: ' + fundUrl);
+        var elapsed = Date.now() - t0;
 
-            var fundResp = await httpsGetWithRetry(fundUrl, TASE_FUND_HEADERS, TASE_LEGACY_HEADERS);
+        // Log what happened
+        if (results[0].status === 'rejected') console.log('  stock: ' + results[0].reason.message);
+        else console.log('  stock: HTTP ' + results[0].value.status + ' json=' + !!secData);
+        if (results[1].status === 'rejected') console.log('  fund:  ' + results[1].reason.message);
+        else console.log('  fund:  HTTP ' + results[1].value.status + ' json=' + !!fundData);
 
-            if (fundResp && fundResp.status === 200) {
-                var fundBody = fundResp.body.toString();
-                if (fundBody && fundBody[0] === '{') {
-                    try {
-                        var fundData = JSON.parse(fundBody);
-                        if (fundData && fundData.UnitValuePrice != null) {
-                            console.log('  => Fund found: ' + (fundData.FundShortName || id) + ' price=' + fundData.UnitValuePrice);
-                            sendJson(res, 200, {
-                                source: 'tase-fund',
-                                price: fundData.UnitValuePrice,
-                                name: fundData.FundLongName || fundData.FundShortName || id,
-                                dayYield: fundData.DayYield,
-                                monthYield: fundData.MonthYield,
-                                yearYield: fundData.YearYield,
-                            });
-                            return;
-                        }
-                    } catch (parseErr) {
-                        console.log('  Fund JSON parse error: ' + parseErr.message);
-                    }
-                }
-            }
-
-            console.log('  => NOT FOUND for id=' + id);
-            sendJson(res, 404, { error: 'Security not found: ' + id });
-        } catch (err) {
-            console.log('  => ERROR for id=' + id + ': ' + err.message);
-            sendJson(res, 502, { error: err.message });
+        // Prefer stock data if available
+        if (secData && secData.LastRate != null) {
+            console.log('  => stock: ' + (secData.Name || id) + ' price=' + secData.LastRate + ' (' + elapsed + 'ms)');
+            sendJson(res, 200, {
+                source: 'tase-security',
+                price: secData.LastRate,
+                name: secData.LongName || secData.Name || id,
+                change: secData.Change,
+            });
+            return;
         }
+
+        // Otherwise use fund data
+        if (fundData && fundData.UnitValuePrice != null) {
+            console.log('  => fund: ' + (fundData.FundShortName || id) + ' price=' + fundData.UnitValuePrice + ' (' + elapsed + 'ms)');
+            sendJson(res, 200, {
+                source: 'tase-fund',
+                price: fundData.UnitValuePrice,
+                name: fundData.FundLongName || fundData.FundShortName || id,
+                dayYield: fundData.DayYield,
+                monthYield: fundData.MonthYield,
+                yearYield: fundData.YearYield,
+            });
+            return;
+        }
+
+        console.log('  => NOT FOUND (' + elapsed + 'ms)');
+        sendJson(res, 404, { error: 'Not found: ' + id });
         return;
     }
 
-    // Simple ping to verify server is running
+    // Batch endpoint: fetch multiple TASE IDs in one request
+    if (url.pathname === '/api/tase/batch') {
+        var ids = (url.searchParams.get('ids') || '').split(',').filter(Boolean);
+        if (ids.length === 0) { sendJson(res, 400, { error: 'No ids' }); return; }
+        console.log('[TASE BATCH] ids=' + ids.join(','));
+        var t0b = Date.now();
+
+        // Fire ALL requests for all IDs in parallel (stock + fund per ID)
+        var allPromises = ids.map(function (id) {
+            var secUrl = 'https://api.tase.co.il/api/company/securitydata?securityId=' +
+                encodeURIComponent(id) + '&lang=1';
+            var fundUrl = 'https://mayaapi.tase.co.il/api/fund/details?fundId=' +
+                encodeURIComponent(id);
+            return Promise.allSettled([
+                httpsGet(secUrl, TASE_STOCK_HEADERS, 5000),
+                httpsGet(fundUrl, TASE_FUND_HEADERS, 5000),
+            ]);
+        });
+
+        var allResults = await Promise.all(allPromises);
+        var batchResult = {};
+
+        for (var i = 0; i < ids.length; i++) {
+            var bid = ids[i];
+            var sr = allResults[i][0];
+            var fr = allResults[i][1];
+            var sd = parseTaseResponse(sr.status === 'fulfilled' ? sr.value : null);
+            var fd = parseTaseResponse(fr.status === 'fulfilled' ? fr.value : null);
+
+            if (sd && sd.LastRate != null) {
+                batchResult[bid] = {
+                    source: 'tase-security',
+                    price: sd.LastRate,
+                    name: sd.LongName || sd.Name || bid,
+                    change: sd.Change,
+                };
+                console.log('  ' + bid + ': stock ' + (sd.Name || bid) + ' price=' + sd.LastRate);
+            } else if (fd && fd.UnitValuePrice != null) {
+                batchResult[bid] = {
+                    source: 'tase-fund',
+                    price: fd.UnitValuePrice,
+                    name: fd.FundLongName || fd.FundShortName || bid,
+                    dayYield: fd.DayYield,
+                    monthYield: fd.MonthYield,
+                    yearYield: fd.YearYield,
+                };
+                console.log('  ' + bid + ': fund ' + (fd.FundShortName || bid) + ' price=' + fd.UnitValuePrice);
+            } else {
+                batchResult[bid] = null;
+                console.log('  ' + bid + ': not found');
+            }
+        }
+
+        console.log('[TASE BATCH] done in ' + (Date.now() - t0b) + 'ms');
+        sendJson(res, 200, batchResult);
+        return;
+    }
+
+    // Ping
     if (url.pathname === '/api/ping') {
         sendJson(res, 200, { ok: true, time: new Date().toISOString() });
         return;
     }
 
-    // Diagnostic endpoint: test TASE APIs directly and report status
+    // Diagnostic
     if (url.pathname === '/api/tase/test') {
         var testId = url.searchParams.get('id') || '507012';
         var results = { testId: testId, stock: {}, fund: {}, timestamp: new Date().toISOString() };
 
-        // Test stock endpoint with short timeout
-        try {
-            var sUrl = 'https://api.tase.co.il/api/company/securitydata?securityId=' +
-                encodeURIComponent(testId) + '&lang=1';
-            console.log('[TEST] Testing stock endpoint for id=' + testId);
-            var sResp = await httpsGet(sUrl, TASE_STOCK_HEADERS, 8000);
-            var sBody = sResp.body.toString();
-            results.stock = {
-                status: sResp.status,
-                isJson: sBody.length > 0 && sBody[0] === '{',
-                bodyLength: sBody.length,
-                bodyPreview: sBody.substring(0, 300),
-                contentType: sResp.headers['content-type'],
-            };
-            if (results.stock.isJson) {
-                try {
-                    var parsed = JSON.parse(sBody);
-                    results.stock.name = parsed.Name;
-                    results.stock.lastRate = parsed.LastRate;
-                } catch (e) { results.stock.parseError = e.message; }
-            }
-            console.log('[TEST] Stock result: status=' + sResp.status + ' isJson=' + results.stock.isJson);
-        } catch (e) {
-            results.stock = { error: e.message };
-            console.log('[TEST] Stock error: ' + e.message);
-        }
+        var stockP = httpsGet(
+            'https://api.tase.co.il/api/company/securitydata?securityId=' + encodeURIComponent(testId) + '&lang=1',
+            TASE_STOCK_HEADERS, 5000
+        ).then(function (r) {
+            var b = r.body.toString();
+            results.stock = { status: r.status, isJson: b.length > 0 && b[0] === '{', bodyLength: b.length, bodyPreview: b.substring(0, 300) };
+            if (results.stock.isJson) { try { var p = JSON.parse(b); results.stock.name = p.Name; results.stock.lastRate = p.LastRate; } catch (e) {} }
+        }).catch(function (e) { results.stock = { error: e.message }; });
 
-        // Test fund endpoint with short timeout
-        try {
-            var fUrl = 'https://mayaapi.tase.co.il/api/fund/details?fundId=' + encodeURIComponent(testId);
-            console.log('[TEST] Testing fund endpoint for id=' + testId);
-            var fResp = await httpsGet(fUrl, TASE_FUND_HEADERS, 8000);
-            var fBody = fResp.body.toString();
-            results.fund = {
-                status: fResp.status,
-                isJson: fBody.length > 0 && fBody[0] === '{',
-                bodyLength: fBody.length,
-                bodyPreview: fBody.substring(0, 300),
-                contentType: fResp.headers['content-type'],
-            };
-            if (results.fund.isJson) {
-                try {
-                    var parsed2 = JSON.parse(fBody);
-                    results.fund.name = parsed2.FundShortName;
-                    results.fund.unitPrice = parsed2.UnitValuePrice;
-                } catch (e) { results.fund.parseError = e.message; }
-            }
-            console.log('[TEST] Fund result: status=' + fResp.status + ' isJson=' + results.fund.isJson);
-        } catch (e) {
-            results.fund = { error: e.message };
-            console.log('[TEST] Fund error: ' + e.message);
-        }
+        var fundP = httpsGet(
+            'https://mayaapi.tase.co.il/api/fund/details?fundId=' + encodeURIComponent(testId),
+            TASE_FUND_HEADERS, 5000
+        ).then(function (r) {
+            var b = r.body.toString();
+            results.fund = { status: r.status, isJson: b.length > 0 && b[0] === '{', bodyLength: b.length, bodyPreview: b.substring(0, 300) };
+            if (results.fund.isJson) { try { var p = JSON.parse(b); results.fund.name = p.FundShortName; results.fund.unitPrice = p.UnitValuePrice; } catch (e) {} }
+        }).catch(function (e) { results.fund = { error: e.message }; });
 
+        await Promise.allSettled([stockP, fundP]);
         sendJson(res, 200, results);
         return;
     }
@@ -303,29 +260,20 @@ http.createServer(async function (req, res) {
     // Static files
     var filePath = url.pathname === '/' ? '/index.html' : url.pathname;
     var fullPath = path.join(STATIC_DIR, filePath);
-
-    // Prevent directory traversal
-    if (!fullPath.startsWith(STATIC_DIR)) {
-        res.writeHead(403);
-        return res.end('Forbidden');
-    }
+    if (!fullPath.startsWith(STATIC_DIR)) { res.writeHead(403); return res.end('Forbidden'); }
 
     fs.readFile(fullPath, function (err, data) {
-        if (err) {
-            res.writeHead(404);
-            return res.end('Not found');
-        }
+        if (err) { res.writeHead(404); return res.end('Not found'); }
         var ext = path.extname(fullPath);
         res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
         res.end(data);
     });
   } catch (err) {
-    console.error('[SERVER] Unhandled error: ' + err.message);
-    try { sendJson(res, 500, { error: 'Internal server error: ' + err.message }); } catch (e2) { /* ignore */ }
+    console.error('[SERVER] Error: ' + err.message);
+    try { sendJson(res, 500, { error: err.message }); } catch (e2) { /* ignore */ }
   }
 }).listen(PORT, '0.0.0.0', function () {
     console.log('Server running at http://localhost:' + PORT);
-    console.log('  Open in browser: http://localhost:' + PORT);
-    console.log('  TASE diagnostic: http://localhost:' + PORT + '/api/tase/test?id=507012');
+    console.log('  Diagnostic: http://localhost:' + PORT + '/api/tase/test?id=507012');
     console.log('');
 });

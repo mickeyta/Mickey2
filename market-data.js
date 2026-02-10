@@ -99,12 +99,16 @@ const MarketData = (function () {
                 progress();
             }
 
-            // Fetch Israeli securities via local server proxy
-            for (var fi = 0; fi < israeliIds.length; fi++) {
-                var id = israeliIds[fi];
-                var iquote = await _fetchTASESingle(id);
-                if (iquote) fetched[id] = iquote;
-                progress();
+            // Fetch all Israeli securities in one batch (parallel on server)
+            if (israeliIds.length > 0) {
+                var batchData = await _fetchTASEBatch(israeliIds);
+                for (var fi = 0; fi < israeliIds.length; fi++) {
+                    var id = israeliIds[fi];
+                    if (batchData && batchData[id]) {
+                        fetched[id] = _parseTASEResult(id, batchData[id]);
+                    }
+                    progress();
+                }
             }
 
             var ts = Date.now();
@@ -175,51 +179,34 @@ const MarketData = (function () {
     }
 
     /**
-     * Fetch a single Israeli security from the local TASE proxy.
-     * The server tries the stock endpoint first, then the fund endpoint.
-     * Requires running: node server.js
+     * Fetch all Israeli securities in one batch request.
+     * Server fires all TASE API calls in parallel and returns results.
      */
-    async function _fetchTASESingle(id) {
+    async function _fetchTASEBatch(ids) {
         try {
-            var resp = await fetch('/api/tase/quote?id=' + encodeURIComponent(id));
+            var resp = await fetch('/api/tase/batch?ids=' + ids.map(encodeURIComponent).join(','));
             if (!resp.ok) {
-                console.warn('[TASE] HTTP ' + resp.status + ' for id=' + id);
-                var errText = '';
-                try { errText = await resp.text(); } catch (e2) { /* ignore */ }
-                console.warn('[TASE] Response: ' + errText.substring(0, 200));
+                console.warn('[TASE] Batch HTTP ' + resp.status);
                 return null;
             }
-            var data = await resp.json();
-            if (!data || data.error) {
-                console.warn('[TASE] Error for id=' + id + ': ' + (data && data.error || 'empty response'));
-                return null;
-            }
-
-            if (data.source === 'tase-security') {
-                // Stock: price is in agorot, convert to ILS
-                return {
-                    price: data.price != null ? data.price / 100 : null,
-                    previousClose: null,
-                    change: null,
-                    changePercent: null,
-                    currency: 'ILS',
-                    name: data.name || id,
-                };
-            } else if (data.source === 'tase-fund') {
-                // Fund: UnitValuePrice is in agorot, convert to ILS
-                return {
-                    price: data.price != null ? data.price / 100 : null,
-                    previousClose: null,
-                    change: null,
-                    changePercent: data.dayYield != null ? data.dayYield : null,
-                    currency: 'ILS',
-                    name: data.name || id,
-                };
-            }
+            return await resp.json();
         } catch (e) {
-            console.warn('[TASE] Fetch failed for id=' + id + ': ' + e.message);
+            console.warn('[TASE] Batch failed: ' + e.message);
+            return null;
         }
-        return null;
+    }
+
+    /** Convert a TASE batch result item to a quote object */
+    function _parseTASEResult(id, data) {
+        if (!data || !data.price) return null;
+        return {
+            price: data.price / 100,  // agorot to ILS
+            previousClose: null,
+            change: null,
+            changePercent: data.dayYield != null ? data.dayYield : null,
+            currency: 'ILS',
+            name: data.name || id,
+        };
     }
 
     function getCached(symbol) {
