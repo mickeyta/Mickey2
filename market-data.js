@@ -4,8 +4,8 @@
  * Fetches current stock prices from Yahoo Finance API and Israeli
  * securities data from the TASE API.
  *
- * Auto-detects the Node.js proxy server (tries current origin, then
- * localhost:8081). Falls back to CORS proxy if server unavailable.
+ * Tries local server first (same origin, then localhost:8081),
+ * falls back to CORS proxy if server unavailable.
  */
 const MarketData = (function () {
     'use strict';
@@ -13,8 +13,7 @@ const MarketData = (function () {
     const _cache = {};
     let _cacheTTL = 5 * 60 * 1000; // 5 minutes
     let _corsProxy = 'https://api.allorigins.win/get?url=';
-    let _serverBase = null; // auto-detected: '' (relative) or 'http://localhost:8081'
-    let _serverProbed = false;
+    let _serverBase = ''; // detected server base URL
 
     function configure(options) {
         if (options.cacheTTL !== undefined) _cacheTTL = options.cacheTTL;
@@ -47,7 +46,7 @@ const MarketData = (function () {
         };
     }
 
-    /** Fetch with a timeout (ms). Returns null on timeout. */
+    /** Fetch with a timeout (ms). Returns null on timeout/error. */
     async function _fetchWithTimeout(url, timeoutMs) {
         var controller = new AbortController();
         var timer = setTimeout(function () { controller.abort(); }, timeoutMs);
@@ -62,40 +61,32 @@ const MarketData = (function () {
     }
 
     /**
-     * Auto-detect the Node.js proxy server by pinging /api/ping.
-     * Tries current origin first, then localhost:8081.
-     * Result is cached so detection only happens once.
+     * Try to fetch a server API path. Tries relative URL first,
+     * then http://localhost:8081. Returns the response or null.
      */
-    async function _findServer() {
-        if (_serverProbed) return _serverBase;
-        _serverProbed = true;
-
-        // Try relative URL first (same origin)
-        try {
-            var r = await _fetchWithTimeout('/api/ping', 2000);
-            if (r && r.ok) {
-                _serverBase = '';
-                console.log('[MarketData] Server found at current origin');
-                return _serverBase;
-            }
-        } catch (e) {}
-
-        // Try common local ports
-        var ports = [8081, 8080, 3000, 5000];
-        for (var i = 0; i < ports.length; i++) {
-            try {
-                var base = 'http://localhost:' + ports[i];
-                var r2 = await _fetchWithTimeout(base + '/api/ping', 2000);
-                if (r2 && r2.ok) {
-                    _serverBase = base;
-                    console.log('[MarketData] Server found at ' + base);
-                    return _serverBase;
-                }
-            } catch (e) {}
+    async function _serverFetch(path, timeoutMs) {
+        // If we already know the server base, use it directly
+        if (_serverBase) {
+            var resp = await _fetchWithTimeout(_serverBase + path, timeoutMs);
+            if (resp && resp.ok) return resp;
+            return null;
         }
 
-        console.log('[MarketData] No server found, using CORS proxy');
-        _serverBase = null;
+        // Try relative URL (same origin)
+        var r1 = await _fetchWithTimeout(path, 3000);
+        if (r1 && r1.ok) {
+            _serverBase = '';
+            return r1;
+        }
+
+        // Try localhost:8081 (Node.js server on default port)
+        var r2 = await _fetchWithTimeout('http://localhost:8081' + path, 3000);
+        if (r2 && r2.ok) {
+            _serverBase = 'http://localhost:8081';
+            console.log('[MarketData] Server found at http://localhost:8081');
+            return r2;
+        }
+
         return null;
     }
 
@@ -126,9 +117,6 @@ const MarketData = (function () {
      */
     async function fetchQuotes(symbols, onProgress) {
         if (!symbols || symbols.length === 0) return {};
-
-        // Auto-detect server on first call
-        await _findServer();
 
         const now = Date.now();
         const upper = symbols.map(function (s) { return s.toUpperCase(); });
@@ -180,31 +168,29 @@ const MarketData = (function () {
     }
 
     /**
-     * Fetch Yahoo symbols via server batch endpoint or CORS proxy fallback.
+     * Fetch Yahoo symbols via server or CORS proxy.
      */
     async function _fetchYahooSymbols(syms, fetched, progress) {
-        // Try server batch endpoint
-        if (_serverBase !== null) {
-            try {
-                var resp = await _fetchWithTimeout(
-                    _serverBase + '/api/yahoo/batch?symbols=' + syms.map(encodeURIComponent).join(','), 30000);
-                if (resp && resp.ok) {
-                    var batchData = await resp.json();
-                    for (var i = 0; i < syms.length; i++) {
-                        var sym = syms[i];
-                        if (batchData && batchData[sym]) {
-                            var q = _parseYahooChart(batchData[sym], sym);
-                            if (q) fetched[sym] = q;
-                        }
-                        progress(sym);
+        // Try server batch endpoint (same origin or localhost:8081)
+        try {
+            var resp = await _serverFetch(
+                '/api/yahoo/batch?symbols=' + syms.map(encodeURIComponent).join(','), 30000);
+            if (resp) {
+                var batchData = await resp.json();
+                for (var i = 0; i < syms.length; i++) {
+                    var sym = syms[i];
+                    if (batchData && batchData[sym]) {
+                        var q = _parseYahooChart(batchData[sym], sym);
+                        if (q) fetched[sym] = q;
                     }
-                    return;
+                    progress(sym);
                 }
-            } catch (e) {}
-        }
+                return;
+            }
+        } catch (e) {}
 
         // Fall back to individual CORS-proxied fetches, 3 at a time
-        console.log('[Yahoo] Falling back to CORS proxy');
+        console.log('[Yahoo] Using CORS proxy');
         for (var ci = 0; ci < syms.length; ci += 3) {
             var chunk = syms.slice(ci, ci + 3);
             await Promise.all(chunk.map(function (sym) {
@@ -220,31 +206,29 @@ const MarketData = (function () {
     }
 
     /**
-     * Fetch TASE symbols via server batch endpoint or CORS proxy fallback.
+     * Fetch TASE symbols via server or CORS proxy.
      */
     async function _fetchTASESymbols(ids, fetched, progress) {
         // Try server batch endpoint
-        if (_serverBase !== null) {
-            try {
-                var resp = await _fetchWithTimeout(
-                    _serverBase + '/api/tase/batch?ids=' + ids.map(encodeURIComponent).join(','), 30000);
-                if (resp && resp.ok) {
-                    var batchData = await resp.json();
-                    for (var i = 0; i < ids.length; i++) {
-                        var id = ids[i];
-                        if (batchData && batchData[id]) {
-                            var q = _parseTASEResult(id, batchData[id]);
-                            if (q) fetched[id] = q;
-                        }
-                        progress(id);
+        try {
+            var resp = await _serverFetch(
+                '/api/tase/batch?ids=' + ids.map(encodeURIComponent).join(','), 30000);
+            if (resp) {
+                var batchData = await resp.json();
+                for (var i = 0; i < ids.length; i++) {
+                    var id = ids[i];
+                    if (batchData && batchData[id]) {
+                        var q = _parseTASEResult(id, batchData[id]);
+                        if (q) fetched[id] = q;
                     }
-                    return;
+                    progress(id);
                 }
-            } catch (e) {}
-        }
+                return;
+            }
+        } catch (e) {}
 
         // Fall back to individual CORS-proxied fetches (try both stock + fund)
-        console.log('[TASE] Falling back to CORS proxy');
+        console.log('[TASE] Using CORS proxy');
         for (var ci = 0; ci < ids.length; ci += 2) {
             var chunk = ids.slice(ci, ci + 2);
             await Promise.all(chunk.map(function (id) {
