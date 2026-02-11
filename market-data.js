@@ -13,7 +13,7 @@ const MarketData = (function () {
     const _cache = {};
     let _cacheTTL = 5 * 60 * 1000; // 5 minutes
     let _corsProxy = 'https://api.allorigins.win/get?url=';
-    let _serverBase = ''; // detected server base URL
+    let _serverBase = null; // null = not detected, '' = same origin, 'http://...' = different port
 
     function configure(options) {
         if (options.cacheTTL !== undefined) _cacheTTL = options.cacheTTL;
@@ -66,25 +66,33 @@ const MarketData = (function () {
      */
     async function _serverFetch(path, timeoutMs) {
         // If we already know the server base, use it directly
-        if (_serverBase) {
+        if (_serverBase !== null) {
             var resp = await _fetchWithTimeout(_serverBase + path, timeoutMs);
             if (resp && resp.ok) return resp;
+            // Server stopped working, reset detection
+            _serverBase = null;
             return null;
         }
 
-        // Try relative URL (same origin)
-        var r1 = await _fetchWithTimeout(path, 3000);
-        if (r1 && r1.ok) {
+        // Try relative URL (same origin) - quick probe with /api/ping
+        var ping1 = await _fetchWithTimeout('/api/ping', 2000);
+        if (ping1 && ping1.ok) {
             _serverBase = '';
-            return r1;
+            console.log('[MarketData] Server at current origin');
+            // Now do the actual request with full timeout
+            var resp1 = await _fetchWithTimeout(path, timeoutMs);
+            if (resp1 && resp1.ok) return resp1;
+            return null;
         }
 
-        // Try localhost:8081 (Node.js server on default port)
-        var r2 = await _fetchWithTimeout('http://localhost:8081' + path, 3000);
-        if (r2 && r2.ok) {
+        // Try localhost:8081
+        var ping2 = await _fetchWithTimeout('http://localhost:8081/api/ping', 2000);
+        if (ping2 && ping2.ok) {
             _serverBase = 'http://localhost:8081';
-            console.log('[MarketData] Server found at http://localhost:8081');
-            return r2;
+            console.log('[MarketData] Server at http://localhost:8081');
+            var resp2 = await _fetchWithTimeout('http://localhost:8081' + path, timeoutMs);
+            if (resp2 && resp2.ok) return resp2;
+            return null;
         }
 
         return null;
