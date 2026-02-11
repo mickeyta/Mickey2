@@ -432,6 +432,15 @@
                     <button id="refreshPrices" class="btn btn-secondary btn-small">Refresh Prices</button>
                 </div>
             </div>
+            <div id="progressArea" style="display:none; padding: 8px 16px;">
+                <div style="display:flex; align-items:center; gap:10px; font-size:13px; color:#8892b0;">
+                    <span id="progressText">Loading...</span>
+                    <div style="flex:1; height:6px; background:#1a1f36; border-radius:3px; overflow:hidden;">
+                        <div id="progressBar" style="height:100%; width:0%; background:linear-gradient(90deg,#00d4ff,#7b2ff7); border-radius:3px; transition:width 0.2s;"></div>
+                    </div>
+                    <span id="progressCount" style="min-width:45px; text-align:right;">0/0</span>
+                </div>
+            </div>
             <div id="marketError" class="market-error"></div>
             <div id="portfolioContainer">
                 <div class="table-wrapper">
@@ -551,6 +560,8 @@
                 const costBasis = stock.amount * stock.avgPrice;
                 const quote = MarketData.getCached(stock.name);
                 const hasPrice = quote && quote.price != null;
+                const currSymbol = (quote && quote.currency === 'ILS') ? '\u20AA' : '$';
+                const displayName = (quote && quote.name) ? quote.name : '';
 
                 let currentPriceHtml, marketValueHtml, gainLossHtml;
 
@@ -562,20 +573,20 @@
                     const cls = gainLoss > 0 ? 'price-up' : gainLoss < 0 ? 'price-down' : 'price-neutral';
                     const sign = gainLoss >= 0 ? '+' : '';
 
-                    currentPriceHtml = `$${formatNumber(currentPrice, 2)}`;
-                    marketValueHtml = `<span class="${cls}">$${formatNumber(marketValue, 2)}</span>`;
-                    gainLossHtml = `<span class="gain-loss ${cls}">${sign}$${formatNumber(gainLoss, 2)} (${sign}${gainLossPct.toFixed(1)}%)</span>`;
+                    currentPriceHtml = `${currSymbol}${formatNumber(currentPrice, 2)}`;
+                    marketValueHtml = `<span class="${cls}">${currSymbol}${formatNumber(marketValue, 2)}</span>`;
+                    gainLossHtml = `<span class="gain-loss ${cls}">${sign}${currSymbol}${formatNumber(gainLoss, 2)} (${sign}${gainLossPct.toFixed(1)}%)</span>`;
                 } else {
                     currentPriceHtml = marketDataLoaded ? '<span class="price-neutral">N/A</span>' : '<span class="price-pending">--</span>';
-                    marketValueHtml = `$${formatNumber(costBasis, 2)}`;
+                    marketValueHtml = `${currSymbol}${formatNumber(costBasis, 2)}`;
                     gainLossHtml = '<span class="price-neutral">--</span>';
                 }
 
                 return `
                     <tr>
-                        <td class="stock-name">${escapeHtml(stock.name)}</td>
+                        <td class="stock-name">${escapeHtml(stock.name)}${displayName ? '<br><small style="color:#a0a0a0;font-weight:normal">' + escapeHtml(displayName) + '</small>' : ''}</td>
                         <td>${formatNumber(stock.amount)}</td>
-                        <td>$${formatNumber(stock.avgPrice, 2)}</td>
+                        <td>${currSymbol}${formatNumber(stock.avgPrice, 2)}</td>
                         <td>${currentPriceHtml}</td>
                         <td class="total-value">${marketValueHtml}</td>
                         <td>${gainLossHtml}</td>
@@ -632,25 +643,59 @@
             const symbols = portfolio.map(s => s.name);
             const btn = document.getElementById('refreshPrices');
             const errorEl = document.getElementById('marketError');
+            const progressArea = document.getElementById('progressArea');
+            const progressBar = document.getElementById('progressBar');
+            const progressText = document.getElementById('progressText');
+            const progressCount = document.getElementById('progressCount');
 
-            btn.innerHTML = '<span class="loading-spinner"></span>Loading...';
+            btn.innerHTML = '<span class="loading-spinner"></span>Fetching...';
             btn.disabled = true;
             errorEl.classList.remove('visible');
+            progressArea.style.display = 'block';
+            progressBar.style.width = '5%';
+            progressText.textContent = 'Fetching ' + symbols.length + ' symbols...';
+            progressCount.textContent = '0/' + symbols.length;
+
+            // Animate progress bar while waiting
+            var lastDone = 0;
+            var pulseInterval = setInterval(function () {
+                if (lastDone === 0) {
+                    // Pulse between 5-30% while waiting for first results
+                    var cur = parseFloat(progressBar.style.width) || 5;
+                    cur += 2;
+                    if (cur > 30) cur = 5;
+                    progressBar.style.width = cur + '%';
+                }
+            }, 300);
 
             try {
-                await MarketData.fetchQuotes(symbols);
+                await MarketData.fetchQuotes(symbols, function(done, total, sym) {
+                    lastDone = done;
+                    var pct = Math.round((done / total) * 100);
+                    progressBar.style.width = pct + '%';
+                    progressCount.textContent = done + '/' + total;
+                    if (done >= total) {
+                        progressText.textContent = 'Done!';
+                    } else {
+                        progressText.textContent = sym;
+                    }
+                    renderPortfolio();
+                });
+                clearInterval(pulseInterval);
                 marketDataLoaded = true;
                 const now = new Date();
                 document.getElementById('lastUpdated').textContent =
                     'Updated ' + now.toLocaleTimeString();
             } catch (err) {
+                clearInterval(pulseInterval);
                 marketDataLoaded = true;
                 errorEl.textContent = 'Could not fetch market data: ' + err.message +
-                    '. Prices shown as N/A. If blocked by CORS, configure a proxy via MarketData.configure({ corsProxy: "..." }).';
+                    '. Prices shown as N/A.';
                 errorEl.classList.add('visible');
             } finally {
                 btn.textContent = 'Refresh Prices';
                 btn.disabled = false;
+                progressArea.style.display = 'none';
                 renderPortfolio();
             }
         }
