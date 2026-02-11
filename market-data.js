@@ -6,15 +6,6 @@
  *
  * Tries local server proxy first (/api/* endpoints), falls back to
  * CORS proxy (allorigins.win) if the server isn't available.
- *
- * Usage:
- *   const quotes = await MarketData.fetchQuotes(['AAPL', 'MSFT']);
- *   console.log(quotes.AAPL.price); // 185.50
- *
- * With progress callback:
- *   await MarketData.fetchQuotes(['AAPL','MSFT'], function(done, total) {
- *       console.log(done + '/' + total);
- *   });
  */
 const MarketData = (function () {
     'use strict';
@@ -54,43 +45,39 @@ const MarketData = (function () {
         };
     }
 
-    /**
-     * Fetch a URL through the allorigins CORS proxy with retry.
-     * The /get endpoint wraps the response in {contents: "..."}.
-     */
-    async function _proxiedFetch(targetUrl, retries) {
-        if (retries === undefined) retries = 2;
-        var url = _corsProxy + encodeURIComponent(targetUrl);
-
-        for (var attempt = 0; attempt <= retries; attempt++) {
-            try {
-                if (attempt > 0) {
-                    await new Promise(function (r) { setTimeout(r, 1000 * attempt); });
-                }
-                var resp = await fetch(url);
-                if (!resp.ok) continue;
-
-                var wrapper = await resp.json();
-                if (wrapper && wrapper.contents !== undefined) {
-                    if (wrapper.status && wrapper.status.http_code && wrapper.status.http_code >= 400) {
-                        continue;
-                    }
-                    return JSON.parse(wrapper.contents);
-                }
-                return wrapper;
-            } catch (e) {
-                // retry
-            }
+    /** Fetch with a timeout (ms). Returns null on timeout. */
+    async function _fetchWithTimeout(url, timeoutMs) {
+        var controller = new AbortController();
+        var timer = setTimeout(function () { controller.abort(); }, timeoutMs);
+        try {
+            var resp = await fetch(url, { signal: controller.signal });
+            clearTimeout(timer);
+            return resp;
+        } catch (e) {
+            clearTimeout(timer);
+            return null;
         }
-        return null;
     }
 
-    /** Run async tasks in chunks with a delay between chunks */
-    async function _throttled(items, concurrency, delayMs, fn) {
-        for (var i = 0; i < items.length; i += concurrency) {
-            if (i > 0) await new Promise(function (r) { setTimeout(r, delayMs); });
-            var chunk = items.slice(i, i + concurrency);
-            await Promise.all(chunk.map(fn));
+    /**
+     * Fetch a URL through the allorigins CORS proxy.
+     * Single attempt with 8s timeout - no retries to keep things fast.
+     */
+    async function _proxiedFetch(targetUrl) {
+        var url = _corsProxy + encodeURIComponent(targetUrl);
+        try {
+            var resp = await _fetchWithTimeout(url, 8000);
+            if (!resp || !resp.ok) return null;
+            var wrapper = await resp.json();
+            if (wrapper && wrapper.contents !== undefined) {
+                if (wrapper.status && wrapper.status.http_code && wrapper.status.http_code >= 400) {
+                    return null;
+                }
+                return JSON.parse(wrapper.contents);
+            }
+            return wrapper;
+        } catch (e) {
+            return null;
         }
     }
 
@@ -122,42 +109,16 @@ const MarketData = (function () {
                 if (onProgress) onProgress(done, total, sym);
             }
 
-            // Fire Yahoo + TASE in parallel
-            var yahooPromise = null;
-            if (yahooSymbols.length > 0) {
-                yahooPromise = _fetchYahooSymbols(yahooSymbols).then(function (results) {
-                    for (var ri = 0; ri < yahooSymbols.length; ri++) {
-                        var sym = yahooSymbols[ri];
-                        if (results && results[sym]) {
-                            fetched[sym] = results[sym];
-                        }
-                        progress(sym);
-                    }
-                }).catch(function () {
-                    for (var ri = 0; ri < yahooSymbols.length; ri++) {
-                        progress(yahooSymbols[ri]);
-                    }
-                });
-            }
+            // Fire Yahoo + TASE in parallel, with per-symbol progress
+            var yahooPromise = yahooSymbols.length > 0
+                ? _fetchYahooSymbols(yahooSymbols, fetched, progress)
+                : Promise.resolve();
 
-            var tasePromise = null;
-            if (israeliIds.length > 0) {
-                tasePromise = _fetchTASESymbols(israeliIds).then(function (results) {
-                    for (var fi = 0; fi < israeliIds.length; fi++) {
-                        var id = israeliIds[fi];
-                        if (results && results[id]) {
-                            fetched[id] = results[id];
-                        }
-                        progress(id);
-                    }
-                }).catch(function () {
-                    for (var fi = 0; fi < israeliIds.length; fi++) {
-                        progress(israeliIds[fi]);
-                    }
-                });
-            }
+            var tasePromise = israeliIds.length > 0
+                ? _fetchTASESymbols(israeliIds, fetched, progress)
+                : Promise.resolve();
 
-            await Promise.all([yahooPromise, tasePromise].filter(Boolean));
+            await Promise.all([yahooPromise, tasePromise]);
 
             var ts = Date.now();
             for (var sym2 in fetched) {
@@ -185,62 +146,66 @@ const MarketData = (function () {
     }
 
     /**
-     * Fetch Yahoo symbols: try local batch endpoint, fall back to CORS proxy.
-     * Returns { SYMBOL: quoteObject, ... }
+     * Fetch Yahoo symbols. Writes results into `fetched`, calls `progress` per symbol.
+     * Tries local batch first, falls back to CORS proxy (3 at a time).
      */
-    async function _fetchYahooSymbols(syms) {
+    async function _fetchYahooSymbols(syms, fetched, progress) {
         // Try local server batch endpoint first
         try {
-            var resp = await fetch('/api/yahoo/batch?symbols=' + syms.map(encodeURIComponent).join(','));
-            if (resp.ok) {
+            var resp = await _fetchWithTimeout(
+                '/api/yahoo/batch?symbols=' + syms.map(encodeURIComponent).join(','), 15000);
+            if (resp && resp.ok) {
                 var batchData = await resp.json();
-                var out = {};
                 for (var i = 0; i < syms.length; i++) {
                     var sym = syms[i];
                     if (batchData && batchData[sym]) {
                         var q = _parseYahooChart(batchData[sym], sym);
-                        if (q) out[sym] = q;
+                        if (q) fetched[sym] = q;
                     }
+                    progress(sym);
                 }
-                return out;
+                return;
             }
         } catch (e) {
             // Server not available
         }
 
-        // Fall back to individual CORS-proxied fetches, 2 at a time
+        // Fall back to individual CORS-proxied fetches, 3 at a time
         console.log('[Yahoo] Falling back to CORS proxy');
-        var out = {};
-        await _throttled(syms, 2, 500, function (sym) {
-            var targetUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
-                encodeURIComponent(sym) + '?range=1d&interval=1d';
-            return _proxiedFetch(targetUrl).then(function (json) {
-                var q = _parseYahooChart(json, sym);
-                if (q) out[sym] = q;
-            }).catch(function () {});
-        });
-        return out;
+        for (var ci = 0; ci < syms.length; ci += 3) {
+            var chunk = syms.slice(ci, ci + 3);
+            await Promise.all(chunk.map(function (sym) {
+                var targetUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
+                    encodeURIComponent(sym) + '?range=1d&interval=1d';
+                return _proxiedFetch(targetUrl).then(function (json) {
+                    var q = _parseYahooChart(json, sym);
+                    if (q) fetched[sym] = q;
+                    progress(sym);
+                }).catch(function () { progress(sym); });
+            }));
+        }
     }
 
     /**
-     * Fetch TASE symbols: try local batch endpoint, fall back to CORS proxy.
-     * Returns { ID: quoteObject, ... }
+     * Fetch TASE symbols. Writes results into `fetched`, calls `progress` per symbol.
+     * Tries local batch first, falls back to CORS proxy (try both stock + fund).
      */
-    async function _fetchTASESymbols(ids) {
+    async function _fetchTASESymbols(ids, fetched, progress) {
         // Try local server batch endpoint first
         try {
-            var resp = await fetch('/api/tase/batch?ids=' + ids.map(encodeURIComponent).join(','));
-            if (resp.ok) {
+            var resp = await _fetchWithTimeout(
+                '/api/tase/batch?ids=' + ids.map(encodeURIComponent).join(','), 15000);
+            if (resp && resp.ok) {
                 var batchData = await resp.json();
-                var out = {};
                 for (var i = 0; i < ids.length; i++) {
                     var id = ids[i];
                     if (batchData && batchData[id]) {
                         var q = _parseTASEResult(id, batchData[id]);
-                        if (q) out[id] = q;
+                        if (q) fetched[id] = q;
                     }
+                    progress(id);
                 }
-                return out;
+                return;
             }
         } catch (e) {
             // Server not available
@@ -248,42 +213,44 @@ const MarketData = (function () {
 
         // Fall back to individual CORS-proxied fetches (try both stock + fund)
         console.log('[TASE] Falling back to CORS proxy');
-        var out = {};
-        await _throttled(ids, 2, 500, function (id) {
-            var stockUrl = 'https://api.tase.co.il/api/company/securitydata?securityId=' +
-                encodeURIComponent(id) + '&lang=1';
-            var fundUrl = 'https://mayaapi.tase.co.il/api/fund/details?fundId=' +
-                encodeURIComponent(id);
+        for (var ci = 0; ci < ids.length; ci += 2) {
+            var chunk = ids.slice(ci, ci + 2);
+            await Promise.all(chunk.map(function (id) {
+                var stockUrl = 'https://api.tase.co.il/api/company/securitydata?securityId=' +
+                    encodeURIComponent(id) + '&lang=1';
+                var fundUrl = 'https://mayaapi.tase.co.il/api/fund/details?fundId=' +
+                    encodeURIComponent(id);
 
-            return Promise.all([
-                _proxiedFetch(stockUrl).catch(function () { return null; }),
-                _proxiedFetch(fundUrl).catch(function () { return null; }),
-            ]).then(function (results) {
-                var stockData = results[0];
-                var fundData = results[1];
+                return Promise.all([
+                    _proxiedFetch(stockUrl),
+                    _proxiedFetch(fundUrl),
+                ]).then(function (results) {
+                    var stockData = results[0];
+                    var fundData = results[1];
 
-                if (stockData && stockData.LastRate != null) {
-                    out[id] = {
-                        price: stockData.LastRate / 100,
-                        previousClose: null,
-                        change: null,
-                        changePercent: stockData.Change != null ? stockData.Change : null,
-                        currency: 'ILS',
-                        name: stockData.LongName || stockData.Name || id,
-                    };
-                } else if (fundData && fundData.UnitValuePrice != null) {
-                    out[id] = {
-                        price: fundData.UnitValuePrice / 100,
-                        previousClose: null,
-                        change: null,
-                        changePercent: fundData.DayYield != null ? fundData.DayYield : null,
-                        currency: 'ILS',
-                        name: fundData.FundLongName || fundData.FundShortName || id,
-                    };
-                }
-            });
-        });
-        return out;
+                    if (stockData && stockData.LastRate != null) {
+                        fetched[id] = {
+                            price: stockData.LastRate / 100,
+                            previousClose: null,
+                            change: null,
+                            changePercent: stockData.Change != null ? stockData.Change : null,
+                            currency: 'ILS',
+                            name: stockData.LongName || stockData.Name || id,
+                        };
+                    } else if (fundData && fundData.UnitValuePrice != null) {
+                        fetched[id] = {
+                            price: fundData.UnitValuePrice / 100,
+                            previousClose: null,
+                            change: null,
+                            changePercent: fundData.DayYield != null ? fundData.DayYield : null,
+                            currency: 'ILS',
+                            name: fundData.FundLongName || fundData.FundShortName || id,
+                        };
+                    }
+                    progress(id);
+                }).catch(function () { progress(id); });
+            }));
+        }
     }
 
     /** Convert a TASE batch result item (from server proxy) to a quote object */
