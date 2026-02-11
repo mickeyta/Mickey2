@@ -4,8 +4,8 @@
  * Fetches current stock prices from Yahoo Finance API and Israeli
  * securities data from the TASE API.
  *
- * Tries local server proxy first (/api/* endpoints), falls back to
- * CORS proxy (allorigins.win) if the server isn't available.
+ * Auto-detects the Node.js proxy server (tries current origin, then
+ * localhost:8081). Falls back to CORS proxy if server unavailable.
  */
 const MarketData = (function () {
     'use strict';
@@ -13,6 +13,8 @@ const MarketData = (function () {
     const _cache = {};
     let _cacheTTL = 5 * 60 * 1000; // 5 minutes
     let _corsProxy = 'https://api.allorigins.win/get?url=';
+    let _serverBase = null; // auto-detected: '' (relative) or 'http://localhost:8081'
+    let _serverProbed = false;
 
     function configure(options) {
         if (options.cacheTTL !== undefined) _cacheTTL = options.cacheTTL;
@@ -60,8 +62,46 @@ const MarketData = (function () {
     }
 
     /**
+     * Auto-detect the Node.js proxy server by pinging /api/ping.
+     * Tries current origin first, then localhost:8081.
+     * Result is cached so detection only happens once.
+     */
+    async function _findServer() {
+        if (_serverProbed) return _serverBase;
+        _serverProbed = true;
+
+        // Try relative URL first (same origin)
+        try {
+            var r = await _fetchWithTimeout('/api/ping', 2000);
+            if (r && r.ok) {
+                _serverBase = '';
+                console.log('[MarketData] Server found at current origin');
+                return _serverBase;
+            }
+        } catch (e) {}
+
+        // Try common local ports
+        var ports = [8081, 8080, 3000, 5000];
+        for (var i = 0; i < ports.length; i++) {
+            try {
+                var base = 'http://localhost:' + ports[i];
+                var r2 = await _fetchWithTimeout(base + '/api/ping', 2000);
+                if (r2 && r2.ok) {
+                    _serverBase = base;
+                    console.log('[MarketData] Server found at ' + base);
+                    return _serverBase;
+                }
+            } catch (e) {}
+        }
+
+        console.log('[MarketData] No server found, using CORS proxy');
+        _serverBase = null;
+        return null;
+    }
+
+    /**
      * Fetch a URL through the allorigins CORS proxy.
-     * Single attempt with 8s timeout - no retries to keep things fast.
+     * Single attempt with 8s timeout.
      */
     async function _proxiedFetch(targetUrl) {
         var url = _corsProxy + encodeURIComponent(targetUrl);
@@ -83,12 +123,12 @@ const MarketData = (function () {
 
     /**
      * Fetch current quotes for the given stock symbols.
-     * @param {string[]} symbols
-     * @param {Function} [onProgress] - callback(fetched, total, symbol)
-     * @returns {Promise<Object.<string, QuoteData|null>>}
      */
     async function fetchQuotes(symbols, onProgress) {
         if (!symbols || symbols.length === 0) return {};
+
+        // Auto-detect server on first call
+        await _findServer();
 
         const now = Date.now();
         const upper = symbols.map(function (s) { return s.toUpperCase(); });
@@ -109,7 +149,6 @@ const MarketData = (function () {
                 if (onProgress) onProgress(done, total, sym);
             }
 
-            // Fire Yahoo + TASE in parallel, with per-symbol progress
             var yahooPromise = yahooSymbols.length > 0
                 ? _fetchYahooSymbols(yahooSymbols, fetched, progress)
                 : Promise.resolve();
@@ -124,7 +163,6 @@ const MarketData = (function () {
             for (var sym2 in fetched) {
                 _cache[sym2] = Object.assign({}, fetched[sym2], { _ts: ts });
             }
-            // Don't cache failed symbols - leave them uncached so they retry on next refresh
         }
 
         var result = {};
@@ -142,28 +180,27 @@ const MarketData = (function () {
     }
 
     /**
-     * Fetch Yahoo symbols. Writes results into `fetched`, calls `progress` per symbol.
-     * Tries local batch first, falls back to CORS proxy (3 at a time).
+     * Fetch Yahoo symbols via server batch endpoint or CORS proxy fallback.
      */
     async function _fetchYahooSymbols(syms, fetched, progress) {
-        // Try local server batch endpoint first
-        try {
-            var resp = await _fetchWithTimeout(
-                '/api/yahoo/batch?symbols=' + syms.map(encodeURIComponent).join(','), 15000);
-            if (resp && resp.ok) {
-                var batchData = await resp.json();
-                for (var i = 0; i < syms.length; i++) {
-                    var sym = syms[i];
-                    if (batchData && batchData[sym]) {
-                        var q = _parseYahooChart(batchData[sym], sym);
-                        if (q) fetched[sym] = q;
+        // Try server batch endpoint
+        if (_serverBase !== null) {
+            try {
+                var resp = await _fetchWithTimeout(
+                    _serverBase + '/api/yahoo/batch?symbols=' + syms.map(encodeURIComponent).join(','), 30000);
+                if (resp && resp.ok) {
+                    var batchData = await resp.json();
+                    for (var i = 0; i < syms.length; i++) {
+                        var sym = syms[i];
+                        if (batchData && batchData[sym]) {
+                            var q = _parseYahooChart(batchData[sym], sym);
+                            if (q) fetched[sym] = q;
+                        }
+                        progress(sym);
                     }
-                    progress(sym);
+                    return;
                 }
-                return;
-            }
-        } catch (e) {
-            // Server not available
+            } catch (e) {}
         }
 
         // Fall back to individual CORS-proxied fetches, 3 at a time
@@ -183,28 +220,27 @@ const MarketData = (function () {
     }
 
     /**
-     * Fetch TASE symbols. Writes results into `fetched`, calls `progress` per symbol.
-     * Tries local batch first, falls back to CORS proxy (try both stock + fund).
+     * Fetch TASE symbols via server batch endpoint or CORS proxy fallback.
      */
     async function _fetchTASESymbols(ids, fetched, progress) {
-        // Try local server batch endpoint first
-        try {
-            var resp = await _fetchWithTimeout(
-                '/api/tase/batch?ids=' + ids.map(encodeURIComponent).join(','), 15000);
-            if (resp && resp.ok) {
-                var batchData = await resp.json();
-                for (var i = 0; i < ids.length; i++) {
-                    var id = ids[i];
-                    if (batchData && batchData[id]) {
-                        var q = _parseTASEResult(id, batchData[id]);
-                        if (q) fetched[id] = q;
+        // Try server batch endpoint
+        if (_serverBase !== null) {
+            try {
+                var resp = await _fetchWithTimeout(
+                    _serverBase + '/api/tase/batch?ids=' + ids.map(encodeURIComponent).join(','), 30000);
+                if (resp && resp.ok) {
+                    var batchData = await resp.json();
+                    for (var i = 0; i < ids.length; i++) {
+                        var id = ids[i];
+                        if (batchData && batchData[id]) {
+                            var q = _parseTASEResult(id, batchData[id]);
+                            if (q) fetched[id] = q;
+                        }
+                        progress(id);
                     }
-                    progress(id);
+                    return;
                 }
-                return;
-            }
-        } catch (e) {
-            // Server not available
+            } catch (e) {}
         }
 
         // Fall back to individual CORS-proxied fetches (try both stock + fund)
