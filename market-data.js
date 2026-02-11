@@ -85,6 +85,15 @@ const MarketData = (function () {
         return null;
     }
 
+    /** Run async tasks in chunks with a delay between chunks */
+    async function _throttled(items, concurrency, delayMs, fn) {
+        for (var i = 0; i < items.length; i += concurrency) {
+            if (i > 0) await new Promise(function (r) { setTimeout(r, delayMs); });
+            var chunk = items.slice(i, i + concurrency);
+            await Promise.all(chunk.map(fn));
+        }
+    }
+
     /**
      * Fetch current quotes for the given stock symbols.
      * @param {string[]} symbols
@@ -199,10 +208,10 @@ const MarketData = (function () {
             // Server not available
         }
 
-        // Fall back to individual CORS-proxied fetches
+        // Fall back to individual CORS-proxied fetches, 2 at a time
         console.log('[Yahoo] Falling back to CORS proxy');
         var out = {};
-        var promises = syms.map(function (sym) {
+        await _throttled(syms, 2, 500, function (sym) {
             var targetUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
                 encodeURIComponent(sym) + '?range=1d&interval=1d';
             return _proxiedFetch(targetUrl).then(function (json) {
@@ -210,7 +219,6 @@ const MarketData = (function () {
                 if (q) out[sym] = q;
             }).catch(function () {});
         });
-        await Promise.all(promises);
         return out;
     }
 
@@ -238,24 +246,43 @@ const MarketData = (function () {
             // Server not available
         }
 
-        // Fall back to individual CORS-proxied fetches (fund endpoint)
+        // Fall back to individual CORS-proxied fetches (try both stock + fund)
         console.log('[TASE] Falling back to CORS proxy');
         var out = {};
-        var promises = ids.map(function (id) {
-            var targetUrl = 'https://mayaapi.tase.co.il/api/fund/details?fundId=' + encodeURIComponent(id);
-            return _proxiedFetch(targetUrl).then(function (data) {
-                if (!data || data.UnitValuePrice == null) return;
-                out[id] = {
-                    price: data.UnitValuePrice / 100,  // agorot to ILS
-                    previousClose: null,
-                    change: null,
-                    changePercent: data.DayYield != null ? data.DayYield : null,
-                    currency: 'ILS',
-                    name: data.FundLongName || data.FundShortName || id,
-                };
-            }).catch(function () {});
+        await _throttled(ids, 2, 500, function (id) {
+            var stockUrl = 'https://api.tase.co.il/api/company/securitydata?securityId=' +
+                encodeURIComponent(id) + '&lang=1';
+            var fundUrl = 'https://mayaapi.tase.co.il/api/fund/details?fundId=' +
+                encodeURIComponent(id);
+
+            return Promise.all([
+                _proxiedFetch(stockUrl).catch(function () { return null; }),
+                _proxiedFetch(fundUrl).catch(function () { return null; }),
+            ]).then(function (results) {
+                var stockData = results[0];
+                var fundData = results[1];
+
+                if (stockData && stockData.LastRate != null) {
+                    out[id] = {
+                        price: stockData.LastRate / 100,
+                        previousClose: null,
+                        change: null,
+                        changePercent: stockData.Change != null ? stockData.Change : null,
+                        currency: 'ILS',
+                        name: stockData.LongName || stockData.Name || id,
+                    };
+                } else if (fundData && fundData.UnitValuePrice != null) {
+                    out[id] = {
+                        price: fundData.UnitValuePrice / 100,
+                        previousClose: null,
+                        change: null,
+                        changePercent: fundData.DayYield != null ? fundData.DayYield : null,
+                        currency: 'ILS',
+                        name: fundData.FundLongName || fundData.FundShortName || id,
+                    };
+                }
+            });
         });
-        await Promise.all(promises);
         return out;
     }
 
