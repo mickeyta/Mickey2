@@ -124,11 +124,7 @@ const MarketData = (function () {
             for (var sym2 in fetched) {
                 _cache[sym2] = Object.assign({}, fetched[sym2], { _ts: ts });
             }
-            for (var i = 0; i < stale.length; i++) {
-                if (!fetched[stale[i]] && !_cache[stale[i]]) {
-                    _cache[stale[i]] = { price: null, _ts: ts };
-                }
-            }
+            // Don't cache failed symbols - leave them uncached so they retry on next refresh
         }
 
         var result = {};
