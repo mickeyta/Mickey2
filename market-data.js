@@ -68,34 +68,23 @@ const MarketData = (function () {
     }
 
     /**
-     * Try to fetch a server API path. Tries relative URL first,
-     * then http://localhost:8081. Returns the response or null.
+     * Probe for an API server (same origin or localhost:8081).
+     * Caches the result so it only runs once per session (or re-probes after TTL).
      */
-    async function _serverFetch(path, timeoutMs) {
-        // If we already determined no server is available, skip probing for a while
-        if (_serverBase === false) {
-            if (Date.now() - _serverProbeTs < _serverProbeTTL) return null;
-            // TTL expired, re-probe
-            _serverBase = null;
-        }
+    async function _probeServer() {
+        // Already know the answer (server found or not found within TTL)
+        if (_serverBase === false && Date.now() - _serverProbeTs < _serverProbeTTL) return;
+        if (_serverBase !== null && _serverBase !== false) return;
 
-        // If we already know the server base, use it directly
-        if (_serverBase !== null) {
-            var resp = await _fetchWithTimeout(_serverBase + path, timeoutMs);
-            if (resp && resp.ok) return resp;
-            // Server stopped working, reset detection
-            _serverBase = null;
-            return null;
-        }
+        // Reset for fresh probe
+        _serverBase = null;
 
-        // Try relative URL (same origin) - quick probe with /api/ping
+        // Try relative URL (same origin)
         var ping1 = await _fetchWithTimeout('/api/ping', 1500);
         if (ping1 && ping1.ok) {
             _serverBase = '';
             console.log('[MarketData] Server at current origin');
-            var resp1 = await _fetchWithTimeout(path, timeoutMs);
-            if (resp1 && resp1.ok) return resp1;
-            return null;
+            return;
         }
 
         // Try localhost:8081
@@ -103,15 +92,26 @@ const MarketData = (function () {
         if (ping2 && ping2.ok) {
             _serverBase = 'http://localhost:8081';
             console.log('[MarketData] Server at http://localhost:8081');
-            var resp2 = await _fetchWithTimeout('http://localhost:8081' + path, timeoutMs);
-            if (resp2 && resp2.ok) return resp2;
-            return null;
+            return;
         }
 
-        // No server found — cache this result to avoid repeated probing
+        // No server found
         _serverBase = false;
         _serverProbeTs = Date.now();
         console.log('[MarketData] No server detected, using CORS proxy fallback');
+    }
+
+    /**
+     * Try to fetch a server API path. Returns the response or null.
+     * Assumes _probeServer() has already been called.
+     */
+    async function _serverFetch(path, timeoutMs) {
+        if (!_serverBase) return null; // false or null = no server
+
+        var resp = await _fetchWithTimeout(_serverBase + path, timeoutMs);
+        if (resp && resp.ok) return resp;
+        // Server stopped working, reset detection
+        _serverBase = null;
         return null;
     }
 
@@ -173,6 +173,9 @@ const MarketData = (function () {
                 done++;
                 if (onProgress) onProgress(done, total, sym);
             }
+
+            // Probe for server once before parallel fetches to avoid duplicate pings
+            await _probeServer();
 
             var yahooPromise = yahooSymbols.length > 0
                 ? _fetchYahooSymbols(yahooSymbols, fetched, progress)
