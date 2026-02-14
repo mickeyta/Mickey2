@@ -67,6 +67,18 @@ const MarketData = (function () {
         }
     }
 
+    /** Check if a ping URL returns valid JSON with {ok: true} */
+    async function _pingIsValid(url) {
+        try {
+            var resp = await _fetchWithTimeout(url, 1500);
+            if (!resp || !resp.ok) return false;
+            var json = await resp.json();
+            return json && json.ok === true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     /**
      * Probe for an API server (same origin or localhost:8081).
      * Caches the result so it only runs once per session (or re-probes after TTL).
@@ -80,16 +92,14 @@ const MarketData = (function () {
         _serverBase = null;
 
         // Try relative URL (same origin)
-        var ping1 = await _fetchWithTimeout('/api/ping', 1500);
-        if (ping1 && ping1.ok) {
+        if (await _pingIsValid('/api/ping')) {
             _serverBase = '';
             console.log('[MarketData] Server at current origin');
             return;
         }
 
         // Try localhost:8081
-        var ping2 = await _fetchWithTimeout('http://localhost:8081/api/ping', 1500);
-        if (ping2 && ping2.ok) {
+        if (await _pingIsValid('http://localhost:8081/api/ping')) {
             _serverBase = 'http://localhost:8081';
             console.log('[MarketData] Server at http://localhost:8081');
             return;
@@ -124,13 +134,21 @@ const MarketData = (function () {
             var url = proxy.url + encodeURIComponent(targetUrl);
             try {
                 var resp = await _fetchWithTimeout(url, 8000);
-                if (!resp || !resp.ok) continue;
+                if (!resp) {
+                    console.log('[proxy] ' + proxy.url.split('/')[2] + ': timeout/network error');
+                    continue;
+                }
+                if (!resp.ok) {
+                    console.log('[proxy] ' + proxy.url.split('/')[2] + ': HTTP ' + resp.status);
+                    continue;
+                }
 
                 if (proxy.type === 'allorigins') {
                     // allorigins /get wraps in {contents: "...", status: {...}}
                     var wrapper = await resp.json();
                     if (wrapper && wrapper.contents !== undefined) {
                         if (wrapper.status && wrapper.status.http_code && wrapper.status.http_code >= 400) {
+                            console.log('[proxy] ' + proxy.url.split('/')[2] + ': upstream HTTP ' + wrapper.status.http_code);
                             continue;
                         }
                         return JSON.parse(wrapper.contents);
@@ -141,9 +159,10 @@ const MarketData = (function () {
                     if (text && (text[0] === '{' || text[0] === '[')) {
                         return JSON.parse(text);
                     }
+                    console.log('[proxy] ' + proxy.url.split('/')[2] + ': non-JSON response (' + text.substring(0, 80) + ')');
                 }
             } catch (e) {
-                // try next proxy
+                console.log('[proxy] ' + proxy.url.split('/')[2] + ': ' + e.message);
             }
         }
         return null;
@@ -238,9 +257,16 @@ const MarketData = (function () {
                     encodeURIComponent(sym) + '?range=1d&interval=1d';
                 return _proxiedFetch(targetUrl).then(function (json) {
                     var q = _parseYahooChart(json, sym);
-                    if (q) fetched[sym] = q;
+                    if (q) {
+                        fetched[sym] = q;
+                    } else {
+                        console.warn('[Yahoo] ' + sym + ': failed to parse response' + (json ? ' (got keys: ' + Object.keys(json).join(',') + ')' : ' (null response - all proxies failed)'));
+                    }
                     progress(sym);
-                }).catch(function () { progress(sym); });
+                }).catch(function (err) {
+                    console.warn('[Yahoo] ' + sym + ': fetch error: ' + err.message);
+                    progress(sym);
+                });
             }));
         }
     }
@@ -282,9 +308,14 @@ const MarketData = (function () {
                         // Override currency to ILS for TASE securities
                         q.currency = 'ILS';
                         fetched[id] = q;
+                    } else {
+                        console.warn('[TASE] ' + id + ' (' + yahooSymbol + '): failed to parse response' + (json ? ' (got keys: ' + Object.keys(json).join(',') + ')' : ' (null response - all proxies failed)'));
                     }
                     progress(id);
-                }).catch(function () { progress(id); });
+                }).catch(function (err) {
+                    console.warn('[TASE] ' + id + ': fetch error: ' + err.message);
+                    progress(id);
+                });
             }));
         }
     }
