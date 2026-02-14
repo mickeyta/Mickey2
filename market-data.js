@@ -13,6 +13,11 @@ const MarketData = (function () {
     const _cache = {};
     let _cacheTTL = 5 * 60 * 1000; // 5 minutes
     let _corsProxy = 'https://api.allorigins.win/get?url=';
+    let _corsProxies = [
+        { url: 'https://api.allorigins.win/get?url=', type: 'allorigins' },
+        { url: 'https://api.allorigins.win/raw?url=', type: 'raw' },
+        { url: 'https://corsproxy.io/?url=', type: 'raw' },
+    ];
     let _serverBase = null; // null = not detected, '' = same origin, 'http://...' = different port
 
     function configure(options) {
@@ -99,25 +104,37 @@ const MarketData = (function () {
     }
 
     /**
-     * Fetch a URL through the allorigins CORS proxy.
-     * Single attempt with 8s timeout.
+     * Fetch a URL through CORS proxies. Tries each proxy in order until one works.
      */
     async function _proxiedFetch(targetUrl) {
-        var url = _corsProxy + encodeURIComponent(targetUrl);
-        try {
-            var resp = await _fetchWithTimeout(url, 8000);
-            if (!resp || !resp.ok) return null;
-            var wrapper = await resp.json();
-            if (wrapper && wrapper.contents !== undefined) {
-                if (wrapper.status && wrapper.status.http_code && wrapper.status.http_code >= 400) {
-                    return null;
+        for (var pi = 0; pi < _corsProxies.length; pi++) {
+            var proxy = _corsProxies[pi];
+            var url = proxy.url + encodeURIComponent(targetUrl);
+            try {
+                var resp = await _fetchWithTimeout(url, 8000);
+                if (!resp || !resp.ok) continue;
+
+                if (proxy.type === 'allorigins') {
+                    // allorigins /get wraps in {contents: "...", status: {...}}
+                    var wrapper = await resp.json();
+                    if (wrapper && wrapper.contents !== undefined) {
+                        if (wrapper.status && wrapper.status.http_code && wrapper.status.http_code >= 400) {
+                            continue;
+                        }
+                        return JSON.parse(wrapper.contents);
+                    }
+                } else {
+                    // raw proxy returns the content directly
+                    var text = await resp.text();
+                    if (text && (text[0] === '{' || text[0] === '[')) {
+                        return JSON.parse(text);
+                    }
                 }
-                return JSON.parse(wrapper.contents);
+            } catch (e) {
+                // try next proxy
             }
-            return wrapper;
-        } catch (e) {
-            return null;
         }
+        return null;
     }
 
     /**
