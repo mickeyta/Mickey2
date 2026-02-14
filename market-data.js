@@ -18,7 +18,9 @@ const MarketData = (function () {
         { url: 'https://api.allorigins.win/raw?url=', type: 'raw' },
         { url: 'https://corsproxy.io/?url=', type: 'raw' },
     ];
-    let _serverBase = null; // null = not detected, '' = same origin, 'http://...' = different port
+    let _serverBase = null; // null = not detected, '' = same origin, 'http://...' = different port, false = no server
+    let _serverProbeTs = 0; // timestamp of last probe attempt
+    const _serverProbeTTL = 60 * 1000; // re-probe after 60 seconds
 
     function configure(options) {
         if (options.cacheTTL !== undefined) _cacheTTL = options.cacheTTL;
@@ -70,6 +72,13 @@ const MarketData = (function () {
      * then http://localhost:8081. Returns the response or null.
      */
     async function _serverFetch(path, timeoutMs) {
+        // If we already determined no server is available, skip probing for a while
+        if (_serverBase === false) {
+            if (Date.now() - _serverProbeTs < _serverProbeTTL) return null;
+            // TTL expired, re-probe
+            _serverBase = null;
+        }
+
         // If we already know the server base, use it directly
         if (_serverBase !== null) {
             var resp = await _fetchWithTimeout(_serverBase + path, timeoutMs);
@@ -80,18 +89,17 @@ const MarketData = (function () {
         }
 
         // Try relative URL (same origin) - quick probe with /api/ping
-        var ping1 = await _fetchWithTimeout('/api/ping', 2000);
+        var ping1 = await _fetchWithTimeout('/api/ping', 1500);
         if (ping1 && ping1.ok) {
             _serverBase = '';
             console.log('[MarketData] Server at current origin');
-            // Now do the actual request with full timeout
             var resp1 = await _fetchWithTimeout(path, timeoutMs);
             if (resp1 && resp1.ok) return resp1;
             return null;
         }
 
         // Try localhost:8081
-        var ping2 = await _fetchWithTimeout('http://localhost:8081/api/ping', 2000);
+        var ping2 = await _fetchWithTimeout('http://localhost:8081/api/ping', 1500);
         if (ping2 && ping2.ok) {
             _serverBase = 'http://localhost:8081';
             console.log('[MarketData] Server at http://localhost:8081');
@@ -100,6 +108,10 @@ const MarketData = (function () {
             return null;
         }
 
+        // No server found — cache this result to avoid repeated probing
+        _serverBase = false;
+        _serverProbeTs = Date.now();
+        console.log('[MarketData] No server detected, using CORS proxy fallback');
         return null;
     }
 
