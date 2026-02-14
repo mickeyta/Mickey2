@@ -252,45 +252,26 @@ const MarketData = (function () {
             }
         } catch (e) {}
 
-        // Fall back to individual CORS-proxied fetches (try both stock + fund)
-        console.log('[TASE] Using CORS proxy');
-        for (var ci = 0; ci < ids.length; ci += 2) {
-            var chunk = ids.slice(ci, ci + 2);
+        // Fall back to Yahoo Finance with .TA suffix (works via CORS proxy)
+        // TASE APIs block CORS proxies due to custom header requirements
+        console.log('[TASE] Using Yahoo Finance .TA suffix via CORS proxy');
+        for (var ci = 0; ci < ids.length; ci += 3) {
+            var chunk = ids.slice(ci, ci + 3);
             await Promise.all(chunk.map(function (id) {
-                var stockUrl = 'https://api.tase.co.il/api/company/securitydata?securityId=' +
-                    encodeURIComponent(id) + '&lang=1';
-                var fundUrl = 'https://mayaapi.tase.co.il/api/fund/details?fundId=' +
-                    encodeURIComponent(id);
-
-                return Promise.all([
-                    _proxiedFetch(stockUrl),
-                    _proxiedFetch(fundUrl),
-                ]).then(function (results) {
-                    var stockData = results[0];
-                    var fundData = results[1];
-
-                    if (stockData && stockData.LastRate != null) {
-                        fetched[id] = {
-                            price: stockData.LastRate / 100,
-                            previousClose: null,
-                            change: null,
-                            changePercent: stockData.Change != null ? stockData.Change : null,
-                            currency: 'ILS',
-                            name: stockData.LongName || stockData.Name || id,
-                        };
-                    } else if (fundData && fundData.UnitValuePrice != null) {
-                        fetched[id] = {
-                            price: fundData.UnitValuePrice / 100,
-                            previousClose: null,
-                            change: null,
-                            changePercent: fundData.DayYield != null ? fundData.DayYield : null,
-                            currency: 'ILS',
-                            name: fundData.FundLongName || fundData.FundShortName || id,
-                        };
+                var yahooSymbol = id + '.TA';
+                var targetUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
+                    encodeURIComponent(yahooSymbol) + '?range=1d&interval=1d';
+                return _proxiedFetch(targetUrl).then(function (json) {
+                    var q = _parseYahooChart(json, yahooSymbol);
+                    if (q) {
+                        // Override currency to ILS for TASE securities
+                        q.currency = 'ILS';
+                        fetched[id] = q;
                     }
                     progress(id);
                 }).catch(function () { progress(id); });
             }));
+        }
         }
     }
 
