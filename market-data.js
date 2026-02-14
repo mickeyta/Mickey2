@@ -272,7 +272,6 @@ const MarketData = (function () {
                 }).catch(function () { progress(id); });
             }));
         }
-        }
     }
 
     /** Convert a TASE batch result item (from server proxy) to a quote object */
