@@ -318,7 +318,81 @@ const MarketData = (function () {
             changePercent: data.dayYield != null ? data.dayYield : null,
             currency: 'ILS',
             name: data.name || id,
+            yearYield: data.yearYield != null ? data.yearYield : null,
+            monthYield: data.monthYield != null ? data.monthYield : null,
+            dayYield: data.dayYield != null ? data.dayYield : null,
         };
+    }
+
+    /**
+     * Fetch YTD and last-year yields for all symbols.
+     * Returns { SYMBOL: { ytd: number|null, oneYear: number|null }, ... }
+     * TASE funds use yearYield from quote cache; Yahoo symbols use /api/yahoo/yields.
+     */
+    async function fetchYields(symbols) {
+        if (!symbols || symbols.length === 0) return {};
+        var upper = symbols.map(function (s) { return s.toUpperCase(); });
+        var israeliIds = upper.filter(_isIsraeliSecurity);
+        var yahooSymbols = upper.filter(function (s) { return !_isIsraeliSecurity(s); });
+        var result = {};
+
+        // For Israeli funds, use cached yearYield from quote data
+        for (var i = 0; i < israeliIds.length; i++) {
+            var id = israeliIds[i];
+            var cached = _cache[id];
+            result[id] = {
+                ytd: cached && cached.yearYield != null ? cached.yearYield : null,
+                oneYear: null, // TASE API doesn't provide last year yield
+            };
+        }
+
+        // For Yahoo symbols, fetch from server
+        if (yahooSymbols.length > 0) {
+            await _probeServer();
+            try {
+                var resp = await _serverFetch(
+                    '/api/yahoo/yields?symbols=' + yahooSymbols.map(encodeURIComponent).join(','), 30000);
+                if (resp) {
+                    var data = await resp.json();
+                    for (var j = 0; j < yahooSymbols.length; j++) {
+                        var sym = yahooSymbols[j];
+                        if (data && data[sym]) {
+                            result[sym] = {
+                                ytd: data[sym].ytd != null ? data[sym].ytd : null,
+                                oneYear: data[sym].oneYear != null ? data[sym].oneYear : null,
+                            };
+                        } else {
+                            result[sym] = { ytd: null, oneYear: null };
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn('[Yields] fetch error: ' + e.message);
+            }
+        }
+
+        return result;
+    }
+
+    /** Fetch the current USD/ILS exchange rate via Yahoo Finance */
+    async function fetchExchangeRate() {
+        await _probeServer();
+        try {
+            var resp = await _serverFetch('/api/yahoo/USDILS=X', 8000);
+            if (resp) {
+                var json = await resp.json();
+                var parsed = _parseYahooChart(json, 'USDILS=X');
+                if (parsed && parsed.price) return parsed.price;
+            }
+        } catch (e) {}
+        // Fallback: try CORS proxy
+        try {
+            var targetUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/USDILS%3DX?range=1d&interval=1d';
+            var json2 = await _proxiedFetch(targetUrl);
+            var parsed2 = _parseYahooChart(json2, 'USDILS=X');
+            if (parsed2 && parsed2.price) return parsed2.price;
+        } catch (e) {}
+        return null;
     }
 
     function getCached(symbol) {
@@ -340,6 +414,8 @@ const MarketData = (function () {
     return {
         configure: configure,
         fetchQuotes: fetchQuotes,
+        fetchYields: fetchYields,
+        fetchExchangeRate: fetchExchangeRate,
         getCached: getCached,
         clearCache: clearCache,
     };

@@ -213,6 +213,13 @@
             color: #00d4ff;
         }
 
+        .summary-item .value-secondary {
+            font-size: 1rem;
+            font-weight: 500;
+            color: #8892b0;
+            margin-top: 4px;
+        }
+
         .empty-state {
             text-align: center;
             padding: 40px;
@@ -479,14 +486,25 @@
                 <div class="summary-item">
                     <div class="label">Cost Basis</div>
                     <div class="value" id="costBasis">$0.00</div>
+                    <div class="value-secondary" id="costBasisILS"></div>
                 </div>
                 <div class="summary-item">
                     <div class="label">Market Value</div>
                     <div class="value" id="totalValue">$0.00</div>
+                    <div class="value-secondary" id="totalValueILS"></div>
                 </div>
                 <div class="summary-item">
                     <div class="label">Total Gain/Loss</div>
                     <div class="value" id="totalGainLoss">--</div>
+                    <div class="value-secondary" id="totalGainLossILS"></div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">YTD Yield</div>
+                    <div class="value" id="ytdYield">--</div>
+                </div>
+                <div class="summary-item">
+                    <div class="label">Last Year Yield</div>
+                    <div class="value" id="lastYearYield">--</div>
                 </div>
             </div>
         </div>
@@ -539,6 +557,8 @@
 
         // Track whether market data has been loaded
         let marketDataLoaded = false;
+        let usdIlsRate = null;
+        let portfolioYields = {};
 
         // Render portfolio table
         function renderPortfolio() {
@@ -607,32 +627,116 @@
             const totalShares = portfolio.reduce((sum, stock) => sum + parseFloat(stock.amount), 0);
             const costBasis = portfolio.reduce((sum, stock) => sum + (stock.amount * stock.avgPrice), 0);
 
-            let marketValue = 0;
+            let marketValueUSD = 0;
+            let marketValueILS = 0;
+            let costBasisUSD = 0;
+            let costBasisILS = 0;
             let hasAnyMarketData = false;
+
             for (const stock of portfolio) {
                 const quote = MarketData.getCached(stock.name);
-                if (quote && quote.price != null) {
-                    marketValue += stock.amount * quote.price;
-                    hasAnyMarketData = true;
+                const isILS = quote && quote.currency === 'ILS';
+                const hasPrice = quote && quote.price != null;
+                const price = hasPrice ? quote.price : stock.avgPrice;
+                const value = stock.amount * price;
+                const cost = stock.amount * stock.avgPrice;
+
+                if (hasPrice) hasAnyMarketData = true;
+
+                if (isILS) {
+                    marketValueILS += value;
+                    costBasisILS += cost;
+                    if (usdIlsRate) {
+                        marketValueUSD += value / usdIlsRate;
+                        costBasisUSD += cost / usdIlsRate;
+                    }
                 } else {
-                    marketValue += stock.amount * stock.avgPrice;
+                    marketValueUSD += value;
+                    costBasisUSD += cost;
+                    if (usdIlsRate) {
+                        marketValueILS += value * usdIlsRate;
+                        costBasisILS += cost * usdIlsRate;
+                    }
                 }
             }
 
             document.getElementById('totalStocks').textContent = totalStocks;
             document.getElementById('totalShares').textContent = formatNumber(totalShares);
-            document.getElementById('costBasis').textContent = '$' + formatNumber(costBasis, 2);
-            document.getElementById('totalValue').textContent = '$' + formatNumber(marketValue, 2);
+            document.getElementById('costBasis').textContent = '$' + formatNumber(costBasisUSD, 2);
+            document.getElementById('totalValue').textContent = '$' + formatNumber(marketValueUSD, 2);
+
+            if (usdIlsRate) {
+                document.getElementById('costBasisILS').textContent = '\u20AA' + formatNumber(costBasisILS, 2);
+                document.getElementById('totalValueILS').textContent = '\u20AA' + formatNumber(marketValueILS, 2);
+            }
 
             if (hasAnyMarketData) {
-                const totalGainLoss = marketValue - costBasis;
-                const pct = costBasis > 0 ? (totalGainLoss / costBasis) * 100 : 0;
-                const sign = totalGainLoss >= 0 ? '+' : '';
-                const cls = totalGainLoss > 0 ? 'price-up' : totalGainLoss < 0 ? 'price-down' : 'price-neutral';
+                const totalGainLossUSD = marketValueUSD - costBasisUSD;
+                const pct = costBasisUSD > 0 ? (totalGainLossUSD / costBasisUSD) * 100 : 0;
+                const sign = totalGainLossUSD >= 0 ? '+' : '';
+                const cls = totalGainLossUSD > 0 ? 'price-up' : totalGainLossUSD < 0 ? 'price-down' : 'price-neutral';
                 document.getElementById('totalGainLoss').innerHTML =
-                    '<span class="' + cls + '">' + sign + '$' + formatNumber(totalGainLoss, 2) + ' (' + sign + pct.toFixed(1) + '%)</span>';
+                    '<span class="' + cls + '">' + sign + '$' + formatNumber(totalGainLossUSD, 2) + ' (' + sign + pct.toFixed(1) + '%)</span>';
+
+                if (usdIlsRate) {
+                    const totalGainLossILS = marketValueILS - costBasisILS;
+                    const signILS = totalGainLossILS >= 0 ? '+' : '';
+                    document.getElementById('totalGainLossILS').innerHTML =
+                        '<span class="' + cls + '">' + signILS + '\u20AA' + formatNumber(totalGainLossILS, 2) + '</span>';
+                }
             } else {
                 document.getElementById('totalGainLoss').textContent = '--';
+                document.getElementById('totalGainLossILS').textContent = '';
+            }
+
+            // YTD and Last Year yields (weighted by market value)
+            updateYieldSummary(marketValueUSD, marketValueILS);
+        }
+
+        function updateYieldSummary(totalMarketUSD, totalMarketILS) {
+            let ytdWeighted = 0, ytdTotal = 0;
+            let oneYWeighted = 0, oneYTotal = 0;
+
+            for (const stock of portfolio) {
+                const quote = MarketData.getCached(stock.name);
+                const isILS = quote && quote.currency === 'ILS';
+                const hasPrice = quote && quote.price != null;
+                const price = hasPrice ? quote.price : stock.avgPrice;
+                var value = stock.amount * price;
+                // Normalize to USD for weighting
+                if (isILS && usdIlsRate) value = value / usdIlsRate;
+
+                const y = portfolioYields[stock.name.toUpperCase()];
+                if (y) {
+                    if (y.ytd != null) {
+                        ytdWeighted += y.ytd * value;
+                        ytdTotal += value;
+                    }
+                    if (y.oneYear != null) {
+                        oneYWeighted += y.oneYear * value;
+                        oneYTotal += value;
+                    }
+                }
+            }
+
+            if (ytdTotal > 0) {
+                const ytdPct = ytdWeighted / ytdTotal;
+                const cls = ytdPct > 0 ? 'price-up' : ytdPct < 0 ? 'price-down' : 'price-neutral';
+                const sign = ytdPct >= 0 ? '+' : '';
+                document.getElementById('ytdYield').innerHTML =
+                    '<span class="' + cls + '">' + sign + ytdPct.toFixed(2) + '%</span>';
+            } else {
+                document.getElementById('ytdYield').textContent = '--';
+            }
+
+            if (oneYTotal > 0) {
+                const oneYPct = oneYWeighted / oneYTotal;
+                const cls = oneYPct > 0 ? 'price-up' : oneYPct < 0 ? 'price-down' : 'price-neutral';
+                const sign = oneYPct >= 0 ? '+' : '';
+                document.getElementById('lastYearYield').innerHTML =
+                    '<span class="' + cls + '">' + sign + oneYPct.toFixed(2) + '%</span>';
+            } else {
+                document.getElementById('lastYearYield').textContent = '--';
             }
         }
 
@@ -683,9 +787,24 @@
                 });
                 clearInterval(pulseInterval);
                 marketDataLoaded = true;
+
+                // Fetch exchange rate and yields in parallel
+                progressText.textContent = 'Fetching rates & yields...';
+                var [rateResult, yieldsResult] = await Promise.allSettled([
+                    MarketData.fetchExchangeRate(),
+                    MarketData.fetchYields(symbols),
+                ]);
+                if (rateResult.status === 'fulfilled' && rateResult.value) {
+                    usdIlsRate = rateResult.value;
+                }
+                if (yieldsResult.status === 'fulfilled' && yieldsResult.value) {
+                    portfolioYields = yieldsResult.value;
+                }
+
                 const now = new Date();
                 document.getElementById('lastUpdated').textContent =
-                    'Updated ' + now.toLocaleTimeString();
+                    'Updated ' + now.toLocaleTimeString() +
+                    (usdIlsRate ? ' (1$ = \u20AA' + usdIlsRate.toFixed(2) + ')' : '');
             } catch (err) {
                 clearInterval(pulseInterval);
                 marketDataLoaded = true;

@@ -168,6 +168,79 @@ http.createServer(async function (req, res) {
         return;
     }
 
+    // Yahoo yields: fetch YTD and 1Y returns for multiple symbols
+    if (url.pathname === '/api/yahoo/yields') {
+        var syms = (url.searchParams.get('symbols') || '').split(',').filter(Boolean);
+        if (syms.length === 0) { sendJson(res, 400, { error: 'No symbols' }); return; }
+        console.log('[YAHOO YIELDS] symbols=' + syms.join(','));
+        var t0y2 = Date.now();
+        var yieldsResult = {};
+        var CONC = 3;
+
+        for (var ci2 = 0; ci2 < syms.length; ci2 += CONC) {
+            var chunk2 = syms.slice(ci2, ci2 + CONC);
+            var chunkResults2 = await Promise.allSettled(chunk2.map(function (s) {
+                var ytdUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
+                    encodeURIComponent(s) + '?range=ytd&interval=1mo';
+                var oneYUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
+                    encodeURIComponent(s) + '?range=1y&interval=1mo';
+                return Promise.allSettled([
+                    httpsGet(ytdUrl, YAHOO_HEADERS, 8000),
+                    httpsGet(oneYUrl, YAHOO_HEADERS, 8000),
+                ]).then(function (results) {
+                    var ytdData = null, oneYData = null;
+                    if (results[0].status === 'fulfilled' && results[0].value.status === 200) {
+                        try { ytdData = JSON.parse(results[0].value.body.toString()); } catch (e) {}
+                    }
+                    if (results[1].status === 'fulfilled' && results[1].value.status === 200) {
+                        try { oneYData = JSON.parse(results[1].value.body.toString()); } catch (e) {}
+                    }
+                    return { symbol: s, ytd: ytdData, oneY: oneYData };
+                });
+            }));
+            for (var cr2 = 0; cr2 < chunkResults2.length; cr2++) {
+                var sym2 = chunk2[cr2];
+                if (chunkResults2[cr2].status === 'fulfilled') {
+                    var v = chunkResults2[cr2].value;
+                    var entry = {};
+                    // YTD: compare first open of year to current price
+                    if (v.ytd && v.ytd.chart && v.ytd.chart.result && v.ytd.chart.result[0]) {
+                        var meta = v.ytd.chart.result[0].meta;
+                        var opens = v.ytd.chart.result[0].indicators &&
+                            v.ytd.chart.result[0].indicators.quote &&
+                            v.ytd.chart.result[0].indicators.quote[0] &&
+                            v.ytd.chart.result[0].indicators.quote[0].open;
+                        var startPrice = opens && opens.length > 0 ? opens[0] : meta.chartPreviousClose;
+                        var curPrice = meta.regularMarketPrice;
+                        if (startPrice && curPrice && startPrice > 0) {
+                            entry.ytd = ((curPrice - startPrice) / startPrice) * 100;
+                        }
+                    }
+                    // 1Y: compare first open of 1y ago to current
+                    if (v.oneY && v.oneY.chart && v.oneY.chart.result && v.oneY.chart.result[0]) {
+                        var meta1 = v.oneY.chart.result[0].meta;
+                        var opens1 = v.oneY.chart.result[0].indicators &&
+                            v.oneY.chart.result[0].indicators.quote &&
+                            v.oneY.chart.result[0].indicators.quote[0] &&
+                            v.oneY.chart.result[0].indicators.quote[0].open;
+                        var startPrice1 = opens1 && opens1.length > 0 ? opens1[0] : meta1.chartPreviousClose;
+                        var curPrice1 = meta1.regularMarketPrice;
+                        if (startPrice1 && curPrice1 && startPrice1 > 0) {
+                            entry.oneYear = ((curPrice1 - startPrice1) / startPrice1) * 100;
+                        }
+                    }
+                    yieldsResult[sym2] = entry;
+                } else {
+                    yieldsResult[sym2] = null;
+                }
+            }
+        }
+
+        console.log('[YAHOO YIELDS] done in ' + (Date.now() - t0y2) + 'ms');
+        sendJson(res, 200, yieldsResult);
+        return;
+    }
+
     // Proxy: Yahoo Finance v8 chart API (single symbol)
     if (url.pathname.startsWith('/api/yahoo/')) {
         var symbol = url.pathname.replace('/api/yahoo/', '');
