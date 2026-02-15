@@ -120,7 +120,7 @@ const MarketData = (function () {
      * Assumes _probeServer() has already been called.
      */
     async function _serverFetch(path, timeoutMs) {
-        if (!_serverBase) return null; // false or null = no server
+        if (_serverBase === false || _serverBase === null) return null; // no server detected
 
         var resp = await _fetchWithTimeout(_serverBase + path, timeoutMs);
         if (resp && resp.ok) return resp;
