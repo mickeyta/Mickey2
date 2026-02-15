@@ -460,6 +460,7 @@
                             <th>Current Price</th>
                             <th>Market Value</th>
                             <th>Gain/Loss</th>
+                            <th>V/P Ratio</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -576,6 +577,19 @@
                 document.getElementById('summarySection').style.display = 'grid';
             }
 
+            // Pre-compute portfolio totals for V/P Ratio
+            const N = portfolio.length;
+            let totalPortfolioValue = 0;
+            let totalPortfolioProfit = 0;
+            for (const s of portfolio) {
+                const q = MarketData.getCached(s.name);
+                const hp = q && q.price != null;
+                const mv = hp ? s.amount * q.price : s.amount * s.avgPrice;
+                const cb = s.amount * s.avgPrice;
+                totalPortfolioValue += mv;
+                totalPortfolioProfit += mv - cb;
+            }
+
             tbody.innerHTML = portfolio.map((stock, index) => {
                 const costBasis = stock.amount * stock.avgPrice;
                 const quote = MarketData.getCached(stock.name);
@@ -583,7 +597,7 @@
                 const currSymbol = (quote && quote.currency === 'ILS') ? '\u20AA' : '$';
                 const displayName = (quote && quote.name) ? quote.name : '';
 
-                let currentPriceHtml, marketValueHtml, gainLossHtml;
+                let currentPriceHtml, marketValueHtml, gainLossHtml, vpRatioHtml;
 
                 if (hasPrice) {
                     const currentPrice = quote.price;
@@ -596,10 +610,22 @@
                     currentPriceHtml = `${currSymbol}${formatNumber(currentPrice, 2)}`;
                     marketValueHtml = `<span class="${cls}">${currSymbol}${formatNumber(marketValue, 2)}</span>`;
                     gainLossHtml = `<span class="gain-loss ${cls}">${sign}${currSymbol}${formatNumber(gainLoss, 2)} (${sign}${gainLossPct.toFixed(1)}%)</span>`;
+
+                    // V/P Ratio: (stockValue * N / totalValue) / (stockProfit / totalProfit)
+                    if (totalPortfolioValue > 0 && totalPortfolioProfit !== 0 && gainLoss !== 0) {
+                        const valueWeight = (marketValue * N) / totalPortfolioValue;
+                        const profitWeight = gainLoss / totalPortfolioProfit;
+                        const vpRatio = valueWeight / profitWeight;
+                        const vpCls = vpRatio <= 1 ? 'price-up' : vpRatio > 2 ? 'price-down' : 'price-neutral';
+                        vpRatioHtml = `<span class="${vpCls}">${vpRatio.toFixed(2)}</span>`;
+                    } else {
+                        vpRatioHtml = '<span class="price-neutral">--</span>';
+                    }
                 } else {
                     currentPriceHtml = marketDataLoaded ? '<span class="price-neutral">N/A</span>' : '<span class="price-pending">--</span>';
                     marketValueHtml = `${currSymbol}${formatNumber(costBasis, 2)}`;
                     gainLossHtml = '<span class="price-neutral">--</span>';
+                    vpRatioHtml = '<span class="price-neutral">--</span>';
                 }
 
                 return `
@@ -610,6 +636,7 @@
                         <td>${currentPriceHtml}</td>
                         <td class="total-value">${marketValueHtml}</td>
                         <td>${gainLossHtml}</td>
+                        <td>${vpRatioHtml}</td>
                         <td class="actions-cell">
                             <button class="btn btn-secondary btn-small" onclick="editStock(${index})">Edit</button>
                             <button class="btn btn-danger btn-small" onclick="deleteStock(${index})">Delete</button>
