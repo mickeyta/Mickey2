@@ -118,7 +118,10 @@ http.createServer(async function (req, res) {
                 if (chunkResults[cr].status === 'fulfilled') {
                     var val = chunkResults[cr].value;
                     if (val.status === 200) {
-                        try { batchResult[sym] = JSON.parse(val.body); } catch (e) { batchResult[sym] = null; }
+                        try { batchResult[sym] = JSON.parse(val.body); } catch (e) {
+                            console.log('  ' + sym + ': JSON parse error: ' + e.message);
+                            batchResult[sym] = null;
+                        }
                     } else {
                         console.log('  ' + sym + ': HTTP ' + val.status);
                         batchResult[sym] = null;
@@ -148,6 +151,7 @@ http.createServer(async function (req, res) {
             });
             res.end(r.body);
         } catch (err) {
+            console.log('[YAHOO] ' + symbol + ': fetch error: ' + err.message);
             sendJson(res, 502, { error: err.message });
         }
         return;
@@ -256,7 +260,17 @@ http.createServer(async function (req, res) {
                 console.log('  ' + bid + ': fund ' + (fd.FundShortName || bid) + ' price=' + fd.UnitValuePrice);
             } else {
                 batchResult[bid] = null;
-                console.log('  ' + bid + ': not found');
+                var reason = '';
+                if (sr.status === 'rejected') reason += 'stock-err:' + sr.reason.message;
+                else if (sr.value.status !== 200) reason += 'stock-http:' + sr.value.status;
+                else if (!sd) reason += 'stock:blocked/invalid-json';
+                else reason += 'stock:no-LastRate';
+                reason += ' | ';
+                if (fr.status === 'rejected') reason += 'fund-err:' + fr.reason.message;
+                else if (fr.value.status !== 200) reason += 'fund-http:' + fr.value.status;
+                else if (!fd) reason += 'fund:blocked/invalid-json';
+                else reason += 'fund:no-UnitValuePrice';
+                console.log('  ' + bid + ': NOT FOUND (' + reason + ')');
             }
         }
 
