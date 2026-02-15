@@ -5,6 +5,36 @@ const path = require('path');
 
 const PORT = parseInt(process.env.PORT, 10) || 3001;
 const STATIC_DIR = __dirname;
+const NAME_CACHE_FILE = path.join(__dirname, 'fund-names-cache.json');
+
+/** Persistent fund name cache: { "507012": "Some Fund Name", ... } */
+var _fundNameCache = {};
+try {
+    if (fs.existsSync(NAME_CACHE_FILE)) {
+        _fundNameCache = JSON.parse(fs.readFileSync(NAME_CACHE_FILE, 'utf8'));
+        console.log('[CACHE] Loaded ' + Object.keys(_fundNameCache).length + ' fund names from cache');
+    }
+} catch (e) {
+    console.log('[CACHE] Could not load name cache: ' + e.message);
+}
+
+function saveFundNameCache() {
+    try {
+        fs.writeFileSync(NAME_CACHE_FILE, JSON.stringify(_fundNameCache, null, 2), 'utf8');
+    } catch (e) {
+        console.log('[CACHE] Could not save name cache: ' + e.message);
+    }
+}
+
+function cacheFundName(id, name) {
+    if (name && name !== id && name !== '') {
+        _fundNameCache[id] = name;
+    }
+}
+
+function getCachedFundName(id) {
+    return _fundNameCache[id] || null;
+}
 
 const MIME = {
     '.html': 'text/html',
@@ -89,7 +119,7 @@ http.createServer(async function (req, res) {
     if (req.method === 'OPTIONS') {
         res.writeHead(204, {
             'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, OPTIONS',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
             'Access-Control-Allow-Headers': '*',
         });
         return res.end();
@@ -184,25 +214,43 @@ http.createServer(async function (req, res) {
         else console.log('  fund:  HTTP ' + results[1].value.status + ' json=' + !!fundData);
 
         if (secData && secData.LastRate != null) {
-            console.log('  => stock: ' + (secData.Name || id) + ' price=' + secData.LastRate + ' (' + elapsed + 'ms)');
+            var secName = secData.LongName || secData.Name || getCachedFundName(id) || id;
+            cacheFundName(id, secName);
+            saveFundNameCache();
+            console.log('  => stock: ' + secName + ' price=' + secData.LastRate + ' (' + elapsed + 'ms)');
             sendJson(res, 200, {
                 source: 'tase-security',
                 price: secData.LastRate,
-                name: secData.LongName || secData.Name || id,
+                name: secName,
                 change: secData.Change,
             });
             return;
         }
 
         if (fundData && fundData.UnitValuePrice != null) {
-            console.log('  => fund: ' + (fundData.FundShortName || id) + ' price=' + fundData.UnitValuePrice + ' (' + elapsed + 'ms)');
+            var fundName = fundData.FundLongName || fundData.FundShortName || getCachedFundName(id) || id;
+            cacheFundName(id, fundName);
+            saveFundNameCache();
+            console.log('  => fund: ' + fundName + ' price=' + fundData.UnitValuePrice + ' (' + elapsed + 'ms)');
             sendJson(res, 200, {
                 source: 'tase-fund',
                 price: fundData.UnitValuePrice,
-                name: fundData.FundLongName || fundData.FundShortName || id,
+                name: fundName,
                 dayYield: fundData.DayYield,
                 monthYield: fundData.MonthYield,
                 yearYield: fundData.YearYield,
+            });
+            return;
+        }
+
+        // API failed but we may have a cached name
+        var cachedName = getCachedFundName(id);
+        if (cachedName) {
+            console.log('  => API failed, using cached name: ' + cachedName + ' (' + elapsed + 'ms)');
+            sendJson(res, 200, {
+                source: 'cache',
+                price: null,
+                name: cachedName,
             });
             return;
         }
@@ -241,42 +289,88 @@ http.createServer(async function (req, res) {
             var fd = parseTaseResponse(fr.status === 'fulfilled' ? fr.value : null);
 
             if (sd && sd.LastRate != null) {
+                var sName = sd.LongName || sd.Name || getCachedFundName(bid) || bid;
+                cacheFundName(bid, sName);
                 batchResult[bid] = {
                     source: 'tase-security',
                     price: sd.LastRate,
-                    name: sd.LongName || sd.Name || bid,
+                    name: sName,
                     change: sd.Change,
                 };
-                console.log('  ' + bid + ': stock ' + (sd.Name || bid) + ' price=' + sd.LastRate);
+                console.log('  ' + bid + ': stock ' + sName + ' price=' + sd.LastRate);
             } else if (fd && fd.UnitValuePrice != null) {
+                var fName = fd.FundLongName || fd.FundShortName || getCachedFundName(bid) || bid;
+                cacheFundName(bid, fName);
                 batchResult[bid] = {
                     source: 'tase-fund',
                     price: fd.UnitValuePrice,
-                    name: fd.FundLongName || fd.FundShortName || bid,
+                    name: fName,
                     dayYield: fd.DayYield,
                     monthYield: fd.MonthYield,
                     yearYield: fd.YearYield,
                 };
-                console.log('  ' + bid + ': fund ' + (fd.FundShortName || bid) + ' price=' + fd.UnitValuePrice);
+                console.log('  ' + bid + ': fund ' + fName + ' price=' + fd.UnitValuePrice);
             } else {
-                batchResult[bid] = null;
-                var reason = '';
-                if (sr.status === 'rejected') reason += 'stock-err:' + sr.reason.message;
-                else if (sr.value.status !== 200) reason += 'stock-http:' + sr.value.status;
-                else if (!sd) reason += 'stock:blocked/invalid-json';
-                else reason += 'stock:no-LastRate';
-                reason += ' | ';
-                if (fr.status === 'rejected') reason += 'fund-err:' + fr.reason.message;
-                else if (fr.value.status !== 200) reason += 'fund-http:' + fr.value.status;
-                else if (!fd) reason += 'fund:blocked/invalid-json';
-                else reason += 'fund:no-UnitValuePrice';
-                console.log('  ' + bid + ': NOT FOUND (' + reason + ')');
+                // API failed - try cached name
+                var cName = getCachedFundName(bid);
+                if (cName) {
+                    batchResult[bid] = {
+                        source: 'cache',
+                        price: null,
+                        name: cName,
+                    };
+                    console.log('  ' + bid + ': API failed, cached name: ' + cName);
+                } else {
+                    batchResult[bid] = null;
+                    var reason = '';
+                    if (sr.status === 'rejected') reason += 'stock-err:' + sr.reason.message;
+                    else if (sr.value.status !== 200) reason += 'stock-http:' + sr.value.status;
+                    else if (!sd) reason += 'stock:blocked/invalid-json';
+                    else reason += 'stock:no-LastRate';
+                    reason += ' | ';
+                    if (fr.status === 'rejected') reason += 'fund-err:' + fr.reason.message;
+                    else if (fr.value.status !== 200) reason += 'fund-http:' + fr.value.status;
+                    else if (!fd) reason += 'fund:blocked/invalid-json';
+                    else reason += 'fund:no-UnitValuePrice';
+                    console.log('  ' + bid + ': NOT FOUND (' + reason + ')');
+                }
             }
         }
 
+        saveFundNameCache();
         console.log('[TASE BATCH] done in ' + (Date.now() - t0b) + 'ms');
         sendJson(res, 200, batchResult);
         return;
+    }
+
+    // Set fund names (POST or GET with query params)
+    if (url.pathname === '/api/tase/names') {
+        if (req.method === 'GET') {
+            sendJson(res, 200, _fundNameCache);
+            return;
+        }
+        if (req.method === 'POST') {
+            var body = '';
+            req.on('data', function (chunk) { body += chunk; });
+            req.on('end', function () {
+                try {
+                    var names = JSON.parse(body);
+                    var count = 0;
+                    for (var nid in names) {
+                        if (names.hasOwnProperty(nid) && names[nid]) {
+                            _fundNameCache[nid] = names[nid];
+                            count++;
+                        }
+                    }
+                    saveFundNameCache();
+                    console.log('[CACHE] Updated ' + count + ' fund names via API');
+                    sendJson(res, 200, { ok: true, count: count });
+                } catch (e) {
+                    sendJson(res, 400, { error: 'Invalid JSON: ' + e.message });
+                }
+            });
+            return;
+        }
     }
 
     // Ping
@@ -288,7 +382,7 @@ http.createServer(async function (req, res) {
     // Diagnostic
     if (url.pathname === '/api/tase/test') {
         var testId = url.searchParams.get('id') || '507012';
-        var results = { testId: testId, stock: {}, fund: {}, timestamp: new Date().toISOString() };
+        var results = { testId: testId, stock: {}, fund: {}, cachedName: getCachedFundName(testId) || null, timestamp: new Date().toISOString() };
 
         var stockP = httpsGet(
             'https://api.tase.co.il/api/company/securitydata?securityId=' + encodeURIComponent(testId) + '&lang=1',

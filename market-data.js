@@ -308,9 +308,11 @@ const MarketData = (function () {
 
     /** Convert a TASE batch result item (from server proxy) to a quote object */
     function _parseTASEResult(id, data) {
-        if (!data || !data.price) return null;
+        if (!data) return null;
+        // Accept partial data (e.g. cached name without price)
+        if (!data.price && !data.name) return null;
         return {
-            price: data.price / 100,  // agorot to ILS
+            price: data.price != null ? data.price / 100 : null,  // agorot to ILS
             previousClose: null,
             change: null,
             changePercent: data.dayYield != null ? data.dayYield : null,
