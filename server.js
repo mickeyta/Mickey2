@@ -3,7 +3,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
-const PORT = 8081;
+const PORT = parseInt(process.env.PORT, 10) || 3001;
 const STATIC_DIR = __dirname;
 
 const MIME = {

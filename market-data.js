@@ -98,11 +98,15 @@ const MarketData = (function () {
             return;
         }
 
-        // Try localhost:8081
-        if (await _pingIsValid('http://localhost:8081/api/ping')) {
-            _serverBase = 'http://localhost:8081';
-            console.log('[MarketData] Server at http://localhost:8081');
-            return;
+        // Try common server ports
+        var ports = ['8081', '3001', '3000'];
+        for (var pi = 0; pi < ports.length; pi++) {
+            var base = 'http://localhost:' + ports[pi];
+            if (await _pingIsValid(base + '/api/ping')) {
+                _serverBase = base;
+                console.log('[MarketData] Server at ' + base);
+                return;
+            }
         }
 
         // No server found
@@ -293,79 +297,12 @@ const MarketData = (function () {
             }
         } catch (e) {}
 
-        // Try TASE APIs directly through CORS proxy (stock + fund endpoints)
-        console.log('[TASE] Trying TASE API via CORS proxy');
-        var remaining = [];
-        for (var ci = 0; ci < ids.length; ci += 3) {
-            var chunk = ids.slice(ci, ci + 3);
-            await Promise.all(chunk.map(function (id) {
-                var secUrl = 'https://api.tase.co.il/api/company/securitydata?securityId=' +
-                    encodeURIComponent(id) + '&lang=1';
-                var fundUrl = 'https://mayaapi.tase.co.il/api/fund/details?fundId=' +
-                    encodeURIComponent(id);
-                // Try stock API first
-                return _proxiedFetch(secUrl).then(function (json) {
-                    if (json && json.LastRate != null) {
-                        console.log('[TASE] ' + id + ': stock via proxy, price=' + json.LastRate);
-                        fetched[id] = {
-                            price: json.LastRate,
-                            previousClose: null,
-                            change: json.Change || null,
-                            changePercent: json.Change != null ? json.Change : null,
-                            currency: 'ILS',
-                            name: json.LongName || json.Name || id,
-                        };
-                        progress(id);
-                        return;
-                    }
-                    // Try fund API
-                    return _proxiedFetch(fundUrl).then(function (fJson) {
-                        if (fJson && fJson.UnitValuePrice != null) {
-                            console.log('[TASE] ' + id + ': fund via proxy, price=' + fJson.UnitValuePrice);
-                            fetched[id] = {
-                                price: fJson.UnitValuePrice,
-                                previousClose: null,
-                                change: null,
-                                changePercent: fJson.DayYield != null ? fJson.DayYield : null,
-                                currency: 'ILS',
-                                name: fJson.FundLongName || fJson.FundShortName || id,
-                            };
-                        } else {
-                            console.warn('[TASE] ' + id + ': both stock and fund APIs failed via proxy');
-                            remaining.push(id);
-                        }
-                        progress(id);
-                    });
-                }).catch(function (err) {
-                    console.warn('[TASE] ' + id + ': proxy error: ' + err.message);
-                    remaining.push(id);
-                    progress(id);
-                });
-            }));
-        }
-
-        // Last resort: try Yahoo Finance with .TA suffix for any remaining
-        if (remaining.length > 0) {
-            console.log('[TASE] Trying Yahoo .TA suffix for remaining: ' + remaining.join(','));
-            for (var ri = 0; ri < remaining.length; ri += 3) {
-                var rChunk = remaining.slice(ri, ri + 3);
-                await Promise.all(rChunk.map(function (id) {
-                    var yahooSymbol = id + '.TA';
-                    var targetUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
-                        encodeURIComponent(yahooSymbol) + '?range=1d&interval=1d';
-                    return _proxiedFetch(targetUrl).then(function (json) {
-                        var q = _parseYahooChart(json, yahooSymbol);
-                        if (q) {
-                            q.currency = 'ILS';
-                            fetched[id] = q;
-                        } else {
-                            console.warn('[TASE] ' + id + ' (' + yahooSymbol + '): Yahoo also failed' + (json ? ' (keys: ' + Object.keys(json).join(',') + ')' : ' (null)'));
-                        }
-                    }).catch(function (err) {
-                        console.warn('[TASE] ' + id + ': Yahoo fetch error: ' + err.message);
-                    });
-                }));
-            }
+        // No server available - Israeli fund data requires the server proxy.
+        // TASE APIs block CORS proxies (Incapsula), and Yahoo doesn't have these fund IDs.
+        console.warn('[TASE] No server available. Israeli fund data requires running server.js.');
+        console.warn('[TASE] Run: node server.js   (serves static files + proxies TASE on port 3001)');
+        for (var fi = 0; fi < ids.length; fi++) {
+            progress(ids[fi]);
         }
     }
 
