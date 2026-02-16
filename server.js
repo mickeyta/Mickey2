@@ -241,38 +241,46 @@ http.createServer(async function (req, res) {
         return;
     }
 
-    // Yahoo P/E ratios: fetch trailingPE for multiple symbols
+    // Yahoo P/E ratios: fetch trailingPE for multiple symbols via v7 quote API
     if (url.pathname === '/api/yahoo/pe') {
         var pSyms = (url.searchParams.get('symbols') || '').split(',').filter(Boolean);
         if (pSyms.length === 0) { sendJson(res, 400, { error: 'No symbols' }); return; }
         console.log('[YAHOO PE] symbols=' + pSyms.join(','));
         var t0pe = Date.now();
         var peResult = {};
-        var PE_CONC = 3;
 
-        for (var ciPe = 0; ciPe < pSyms.length; ciPe += PE_CONC) {
-            var chunkPe = pSyms.slice(ciPe, ciPe + PE_CONC);
-            var chunkResultsPe = await Promise.allSettled(chunkPe.map(function (s) {
-                var peUrl = 'https://query1.finance.yahoo.com/v10/finance/quoteSummary/' +
-                    encodeURIComponent(s) + '?modules=defaultKeyStatistics';
-                return httpsGet(peUrl, YAHOO_HEADERS, 8000);
-            }));
-            for (var crPe = 0; crPe < chunkResultsPe.length; crPe++) {
-                var peSym = chunkPe[crPe];
-                if (chunkResultsPe[crPe].status === 'fulfilled' && chunkResultsPe[crPe].value.status === 200) {
-                    try {
-                        var peJson = JSON.parse(chunkResultsPe[crPe].value.body.toString());
-                        var stats = peJson.quoteSummary && peJson.quoteSummary.result &&
-                            peJson.quoteSummary.result[0] && peJson.quoteSummary.result[0].defaultKeyStatistics;
-                        var pe = stats && stats.trailingPE && stats.trailingPE.raw;
-                        var fpe = stats && stats.forwardPE && stats.forwardPE.raw;
-                        peResult[peSym] = { trailingPE: pe != null ? pe : null, forwardPE: fpe != null ? fpe : null };
-                    } catch (e) {
-                        peResult[peSym] = null;
+        // v7 quote API supports multiple symbols in one request
+        var peUrl = 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' +
+            pSyms.map(encodeURIComponent).join(',') + '&fields=trailingPE,forwardPE';
+        try {
+            var peResp = await httpsGet(peUrl, YAHOO_HEADERS, 15000);
+            if (peResp.status === 200) {
+                var peJson = JSON.parse(peResp.body.toString());
+                var quotes = peJson && peJson.quoteResponse && peJson.quoteResponse.result;
+                if (quotes) {
+                    for (var qi = 0; qi < quotes.length; qi++) {
+                        var q = quotes[qi];
+                        var qSym = q.symbol ? q.symbol.toUpperCase() : null;
+                        if (qSym) {
+                            peResult[qSym] = {
+                                trailingPE: q.trailingPE != null ? q.trailingPE : null,
+                                forwardPE: q.forwardPE != null ? q.forwardPE : null,
+                            };
+                        }
                     }
-                } else {
-                    peResult[peSym] = null;
                 }
+            } else {
+                console.log('[YAHOO PE] v7 returned HTTP ' + peResp.status);
+            }
+        } catch (e) {
+            console.log('[YAHOO PE] fetch error: ' + e.message);
+        }
+
+        // Fill in missing symbols with null
+        for (var pi = 0; pi < pSyms.length; pi++) {
+            var upperSym = pSyms[pi].toUpperCase();
+            if (!peResult[upperSym]) {
+                peResult[upperSym] = null;
             }
         }
 
