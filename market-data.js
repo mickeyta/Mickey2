@@ -374,6 +374,39 @@ const MarketData = (function () {
         return result;
     }
 
+    /** Fetch P/E ratios for Yahoo symbols via server */
+    async function fetchPERatios(symbols) {
+        if (!symbols || symbols.length === 0) return {};
+        var upper = symbols.map(function (s) { return s.toUpperCase(); });
+        var yahooSymbols = upper.filter(function (s) { return !_isIsraeliSecurity(s); });
+        var result = {};
+
+        // Israeli securities don't have P/E from TASE API
+        var israeliIds = upper.filter(_isIsraeliSecurity);
+        for (var i = 0; i < israeliIds.length; i++) {
+            result[israeliIds[i]] = { trailingPE: null, forwardPE: null };
+        }
+
+        if (yahooSymbols.length > 0) {
+            await _probeServer();
+            try {
+                var resp = await _serverFetch(
+                    '/api/yahoo/pe?symbols=' + yahooSymbols.map(encodeURIComponent).join(','), 30000);
+                if (resp) {
+                    var data = await resp.json();
+                    for (var j = 0; j < yahooSymbols.length; j++) {
+                        var sym = yahooSymbols[j];
+                        result[sym] = data && data[sym] ? data[sym] : { trailingPE: null, forwardPE: null };
+                    }
+                }
+            } catch (e) {
+                console.warn('[PE] fetch error: ' + e.message);
+            }
+        }
+
+        return result;
+    }
+
     /** Fetch the current USD/ILS exchange rate via Yahoo Finance */
     async function fetchExchangeRate() {
         await _probeServer();
@@ -415,6 +448,7 @@ const MarketData = (function () {
         configure: configure,
         fetchQuotes: fetchQuotes,
         fetchYields: fetchYields,
+        fetchPERatios: fetchPERatios,
         fetchExchangeRate: fetchExchangeRate,
         getCached: getCached,
         clearCache: clearCache,

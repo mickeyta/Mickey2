@@ -241,6 +241,46 @@ http.createServer(async function (req, res) {
         return;
     }
 
+    // Yahoo P/E ratios: fetch trailingPE for multiple symbols
+    if (url.pathname === '/api/yahoo/pe') {
+        var pSyms = (url.searchParams.get('symbols') || '').split(',').filter(Boolean);
+        if (pSyms.length === 0) { sendJson(res, 400, { error: 'No symbols' }); return; }
+        console.log('[YAHOO PE] symbols=' + pSyms.join(','));
+        var t0pe = Date.now();
+        var peResult = {};
+        var PE_CONC = 3;
+
+        for (var ciPe = 0; ciPe < pSyms.length; ciPe += PE_CONC) {
+            var chunkPe = pSyms.slice(ciPe, ciPe + PE_CONC);
+            var chunkResultsPe = await Promise.allSettled(chunkPe.map(function (s) {
+                var peUrl = 'https://query1.finance.yahoo.com/v10/finance/quoteSummary/' +
+                    encodeURIComponent(s) + '?modules=defaultKeyStatistics';
+                return httpsGet(peUrl, YAHOO_HEADERS, 8000);
+            }));
+            for (var crPe = 0; crPe < chunkResultsPe.length; crPe++) {
+                var peSym = chunkPe[crPe];
+                if (chunkResultsPe[crPe].status === 'fulfilled' && chunkResultsPe[crPe].value.status === 200) {
+                    try {
+                        var peJson = JSON.parse(chunkResultsPe[crPe].value.body.toString());
+                        var stats = peJson.quoteSummary && peJson.quoteSummary.result &&
+                            peJson.quoteSummary.result[0] && peJson.quoteSummary.result[0].defaultKeyStatistics;
+                        var pe = stats && stats.trailingPE && stats.trailingPE.raw;
+                        var fpe = stats && stats.forwardPE && stats.forwardPE.raw;
+                        peResult[peSym] = { trailingPE: pe != null ? pe : null, forwardPE: fpe != null ? fpe : null };
+                    } catch (e) {
+                        peResult[peSym] = null;
+                    }
+                } else {
+                    peResult[peSym] = null;
+                }
+            }
+        }
+
+        console.log('[YAHOO PE] done in ' + (Date.now() - t0pe) + 'ms');
+        sendJson(res, 200, peResult);
+        return;
+    }
+
     // Proxy: Yahoo Finance v8 chart API (single symbol)
     if (url.pathname.startsWith('/api/yahoo/')) {
         var symbol = url.pathname.replace('/api/yahoo/', '');

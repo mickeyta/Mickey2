@@ -501,6 +501,7 @@
                             <th data-sort="currentPrice" onclick="toggleSort('currentPrice')">Current Price <span class="sort-arrow"></span></th>
                             <th data-sort="marketValue" onclick="toggleSort('marketValue')">Market Value <span class="sort-arrow"></span></th>
                             <th data-sort="gainLoss" onclick="toggleSort('gainLoss')">Gain/Loss <span class="sort-arrow"></span></th>
+                            <th data-sort="pe" onclick="toggleSort('pe')">P/E <span class="sort-arrow"></span></th>
                             <th data-sort="ytd" onclick="toggleSort('ytd')">YTD <span class="sort-arrow"></span></th>
                             <th data-sort="oneYear" onclick="toggleSort('oneYear')">1Y <span class="sort-arrow"></span></th>
                             <th data-sort="vRatio" onclick="toggleSort('vRatio')">V <span class="sort-arrow"></span></th>
@@ -605,6 +606,7 @@
         let marketDataLoaded = false;
         let usdIlsRate = null;
         let portfolioYields = {};
+        let portfolioPE = {};
 
         // Sort state
         let sortColumn = null;  // null = original order
@@ -667,9 +669,11 @@
                 const yieldData = portfolioYields[stock.name.toUpperCase()];
                 const ytdVal = yieldData && yieldData.ytd != null ? yieldData.ytd : null;
                 const oneYearVal = yieldData && yieldData.oneYear != null ? yieldData.oneYear : null;
+                const peData = portfolioPE[stock.name.toUpperCase()];
+                const peVal = peData && peData.trailingPE != null ? peData.trailingPE : null;
                 return {
                     index, stock, quote, costBasis, hasPrice, currentPrice, marketValue, gainLoss,
-                    vRatioVal, pRatioVal, vpRatioVal, ytdVal, oneYearVal,
+                    vRatioVal, pRatioVal, vpRatioVal, ytdVal, oneYearVal, peVal,
                     sortValues: {
                         name: stock.name.toLowerCase(),
                         shares: stock.amount,
@@ -677,6 +681,7 @@
                         currentPrice: currentPrice != null ? currentPrice : -Infinity,
                         marketValue: marketValue != null ? marketValue : -Infinity,
                         gainLoss: gainLoss != null ? gainLoss : -Infinity,
+                        pe: peVal != null ? peVal : -Infinity,
                         ytd: ytdVal != null ? ytdVal : -Infinity,
                         oneYear: oneYearVal != null ? oneYearVal : -Infinity,
                         vRatio: vRatioVal != null ? vRatioVal : -Infinity,
@@ -714,7 +719,7 @@
             });
 
             tbody.innerHTML = rows.map(row => {
-                const { index, stock, quote, costBasis, hasPrice, currentPrice, marketValue, gainLoss, vRatioVal, pRatioVal, vpRatioVal, ytdVal, oneYearVal } = row;
+                const { index, stock, quote, costBasis, hasPrice, currentPrice, marketValue, gainLoss, vRatioVal, pRatioVal, vpRatioVal, ytdVal, oneYearVal, peVal } = row;
                 const currSymbol = (quote && quote.currency === 'ILS') ? '\u20AA' : '$';
                 const displayName = (quote && quote.name) ? quote.name : '';
 
@@ -729,6 +734,7 @@
                 }
                 ytdHtml = fmtPct(ytdVal);
                 oneYearHtml = fmtPct(oneYearVal);
+                const peHtml = peVal != null ? peVal.toFixed(1) : dash;
 
                 if (hasPrice) {
                     const gainLossPct = costBasis > 0 ? (gainLoss / costBasis) * 100 : 0;
@@ -764,6 +770,7 @@
                         <td>${currentPriceHtml}</td>
                         <td class="total-value">${marketValueHtml}</td>
                         <td>${gainLossHtml}</td>
+                        <td>${peHtml}</td>
                         <td>${ytdHtml}</td>
                         <td>${oneYearHtml}</td>
                         <td>${vRatioHtml}</td>
@@ -947,17 +954,21 @@
                 clearInterval(pulseInterval);
                 marketDataLoaded = true;
 
-                // Fetch exchange rate and yields in parallel
-                progressText.textContent = 'Fetching rates & yields...';
-                var [rateResult, yieldsResult] = await Promise.allSettled([
+                // Fetch exchange rate, yields, and P/E ratios in parallel
+                progressText.textContent = 'Fetching rates, yields & P/E...';
+                var [rateResult, yieldsResult, peResult] = await Promise.allSettled([
                     MarketData.fetchExchangeRate(),
                     MarketData.fetchYields(symbols),
+                    MarketData.fetchPERatios(symbols),
                 ]);
                 if (rateResult.status === 'fulfilled' && rateResult.value) {
                     usdIlsRate = rateResult.value;
                 }
                 if (yieldsResult.status === 'fulfilled' && yieldsResult.value) {
                     portfolioYields = yieldsResult.value;
+                }
+                if (peResult.status === 'fulfilled' && peResult.value) {
+                    portfolioPE = peResult.value;
                 }
 
                 const now = new Date();
