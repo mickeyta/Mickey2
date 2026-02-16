@@ -609,15 +609,19 @@
                 document.getElementById('summarySection').style.display = 'grid';
             }
 
-            // Pre-compute portfolio totals for V/P Ratio
-            const N = portfolio.length;
+            // Pre-compute portfolio totals for V/P Ratio (normalized to USD)
             let totalPortfolioValue = 0;
             let totalPortfolioProfit = 0;
             for (const s of portfolio) {
                 const q = MarketData.getCached(s.name);
                 const hp = q && q.price != null;
-                const mv = hp ? s.amount * q.price : s.amount * s.avgPrice;
-                const cb = s.amount * s.avgPrice;
+                let mv = hp ? s.amount * q.price : s.amount * s.avgPrice;
+                let cb = s.amount * s.avgPrice;
+                const isILS = q && q.currency === 'ILS';
+                if (isILS && usdIlsRate) {
+                    mv = mv / usdIlsRate;
+                    cb = cb / usdIlsRate;
+                }
                 totalPortfolioValue += mv;
                 totalPortfolioProfit += mv - cb;
             }
@@ -631,11 +635,14 @@
                 const marketValue = hasPrice ? stock.amount * currentPrice : null;
                 const gainLoss = hasPrice ? marketValue - costBasis : null;
                 let vRatioVal = null, pRatioVal = null, vpRatioVal = null;
+                const isILS = quote && quote.currency === 'ILS';
+                const mvUSD = (hasPrice && isILS && usdIlsRate) ? marketValue / usdIlsRate : marketValue;
+                const glUSD = (hasPrice && isILS && usdIlsRate) ? gainLoss / usdIlsRate : gainLoss;
                 if (hasPrice && totalPortfolioValue > 0) {
-                    vRatioVal = marketValue / totalPortfolioValue;
+                    vRatioVal = mvUSD / totalPortfolioValue;
                 }
-                if (hasPrice && totalPortfolioProfit !== 0 && gainLoss !== 0) {
-                    pRatioVal = gainLoss / totalPortfolioProfit;
+                if (hasPrice && totalPortfolioProfit !== 0 && glUSD !== 0) {
+                    pRatioVal = glUSD / totalPortfolioProfit;
                 }
                 if (vRatioVal != null && pRatioVal != null && pRatioVal !== 0) {
                     vpRatioVal = vRatioVal / pRatioVal;
