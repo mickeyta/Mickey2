@@ -611,11 +611,11 @@
                     marketValueHtml = `<span class="${cls}">${currSymbol}${formatNumber(marketValue, 2)}</span>`;
                     gainLossHtml = `<span class="gain-loss ${cls}">${sign}${currSymbol}${formatNumber(gainLoss, 2)} (${sign}${gainLossPct.toFixed(1)}%)</span>`;
 
-                    // V/P Ratio: (stockValue * N / totalValue) / (stockProfit / totalProfit)
+                    // V/P Ratio: (value*N / totalValue) / ((value*N - buyValue*N) / totalProfit)
                     if (totalPortfolioValue > 0 && totalPortfolioProfit !== 0 && gainLoss !== 0) {
-                        const valueWeight = (marketValue * N) / totalPortfolioValue;
-                        const profitWeight = gainLoss / totalPortfolioProfit;
-                        const vpRatio = valueWeight / profitWeight;
+                        const valueWeightN = (marketValue * N) / totalPortfolioValue;
+                        const profitWeightN = (marketValue * N - costBasis * N) / totalPortfolioProfit;
+                        const vpRatio = valueWeightN / profitWeightN;
                         const vpCls = vpRatio <= 1 ? 'price-up' : vpRatio > 2 ? 'price-down' : 'price-neutral';
                         vpRatioHtml = `<span class="${vpCls}">${vpRatio.toFixed(2)}</span>`;
                     } else {
