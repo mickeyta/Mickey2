@@ -201,6 +201,21 @@
         .stock-name {
             font-weight: 600;
             color: #fff;
+            position: sticky;
+            left: 0;
+            z-index: 1;
+            background: #0a0f1e;
+        }
+
+        tr:hover .stock-name {
+            background: #121830;
+        }
+
+        thead th:first-child {
+            position: sticky;
+            left: 0;
+            z-index: 2;
+            background: #0d1225;
         }
 
         .total-value {
@@ -486,6 +501,8 @@
                             <th data-sort="currentPrice" onclick="toggleSort('currentPrice')">Current Price <span class="sort-arrow"></span></th>
                             <th data-sort="marketValue" onclick="toggleSort('marketValue')">Market Value <span class="sort-arrow"></span></th>
                             <th data-sort="gainLoss" onclick="toggleSort('gainLoss')">Gain/Loss <span class="sort-arrow"></span></th>
+                            <th data-sort="ytd" onclick="toggleSort('ytd')">YTD <span class="sort-arrow"></span></th>
+                            <th data-sort="oneYear" onclick="toggleSort('oneYear')">1Y <span class="sort-arrow"></span></th>
                             <th data-sort="vRatio" onclick="toggleSort('vRatio')">V <span class="sort-arrow"></span></th>
                             <th data-sort="pRatio" onclick="toggleSort('pRatio')">P <span class="sort-arrow"></span></th>
                             <th data-sort="vpRatio" onclick="toggleSort('vpRatio')">V/P <span class="sort-arrow"></span></th>
@@ -647,9 +664,12 @@
                 if (vRatioVal != null && pRatioVal != null && pRatioVal !== 0) {
                     vpRatioVal = vRatioVal / pRatioVal;
                 }
+                const yieldData = portfolioYields[stock.name.toUpperCase()];
+                const ytdVal = yieldData && yieldData.ytd != null ? yieldData.ytd : null;
+                const oneYearVal = yieldData && yieldData.oneYear != null ? yieldData.oneYear : null;
                 return {
                     index, stock, quote, costBasis, hasPrice, currentPrice, marketValue, gainLoss,
-                    vRatioVal, pRatioVal, vpRatioVal,
+                    vRatioVal, pRatioVal, vpRatioVal, ytdVal, oneYearVal,
                     sortValues: {
                         name: stock.name.toLowerCase(),
                         shares: stock.amount,
@@ -657,6 +677,8 @@
                         currentPrice: currentPrice != null ? currentPrice : -Infinity,
                         marketValue: marketValue != null ? marketValue : -Infinity,
                         gainLoss: gainLoss != null ? gainLoss : -Infinity,
+                        ytd: ytdVal != null ? ytdVal : -Infinity,
+                        oneYear: oneYearVal != null ? oneYearVal : -Infinity,
                         vRatio: vRatioVal != null ? vRatioVal : -Infinity,
                         pRatio: pRatioVal != null ? pRatioVal : -Infinity,
                         vpRatio: vpRatioVal != null ? vpRatioVal : -Infinity,
@@ -692,12 +714,21 @@
             });
 
             tbody.innerHTML = rows.map(row => {
-                const { index, stock, quote, costBasis, hasPrice, currentPrice, marketValue, gainLoss, vRatioVal, pRatioVal, vpRatioVal } = row;
+                const { index, stock, quote, costBasis, hasPrice, currentPrice, marketValue, gainLoss, vRatioVal, pRatioVal, vpRatioVal, ytdVal, oneYearVal } = row;
                 const currSymbol = (quote && quote.currency === 'ILS') ? '\u20AA' : '$';
                 const displayName = (quote && quote.name) ? quote.name : '';
 
-                let currentPriceHtml, marketValueHtml, gainLossHtml, vRatioHtml, pRatioHtml, vpRatioHtml;
+                let currentPriceHtml, marketValueHtml, gainLossHtml, vRatioHtml, pRatioHtml, vpRatioHtml, ytdHtml, oneYearHtml;
                 const dash = '<span class="price-neutral">--</span>';
+
+                function fmtPct(val) {
+                    if (val == null) return dash;
+                    const cls = val > 0 ? 'price-up' : val < 0 ? 'price-down' : 'price-neutral';
+                    const sign = val >= 0 ? '+' : '';
+                    return `<span class="${cls}">${sign}${val.toFixed(2)}%</span>`;
+                }
+                ytdHtml = fmtPct(ytdVal);
+                oneYearHtml = fmtPct(oneYearVal);
 
                 if (hasPrice) {
                     const gainLossPct = costBasis > 0 ? (gainLoss / costBasis) * 100 : 0;
@@ -733,6 +764,8 @@
                         <td>${currentPriceHtml}</td>
                         <td class="total-value">${marketValueHtml}</td>
                         <td>${gainLossHtml}</td>
+                        <td>${ytdHtml}</td>
+                        <td>${oneYearHtml}</td>
                         <td>${vRatioHtml}</td>
                         <td>${pRatioHtml}</td>
                         <td>${vpRatioHtml}</td>
