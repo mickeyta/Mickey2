@@ -166,6 +166,32 @@
             text-transform: uppercase;
             font-size: 0.85rem;
             letter-spacing: 1px;
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+        }
+
+        th:hover {
+            color: #fff;
+        }
+
+        th .sort-arrow {
+            display: inline-block;
+            margin-left: 4px;
+            font-size: 0.7rem;
+            opacity: 0.4;
+        }
+
+        th.sorted .sort-arrow {
+            opacity: 1;
+        }
+
+        th:last-child {
+            cursor: default;
+        }
+
+        th:last-child:hover {
+            color: #00d4ff;
         }
 
         tr:hover {
@@ -454,13 +480,13 @@
                 <table id="portfolioTable">
                     <thead>
                         <tr>
-                            <th>Stock</th>
-                            <th>Shares</th>
-                            <th>Avg. Price</th>
-                            <th>Current Price</th>
-                            <th>Market Value</th>
-                            <th>Gain/Loss</th>
-                            <th>V/P Ratio</th>
+                            <th data-sort="name" onclick="toggleSort('name')">Stock <span class="sort-arrow"></span></th>
+                            <th data-sort="shares" onclick="toggleSort('shares')">Shares <span class="sort-arrow"></span></th>
+                            <th data-sort="avgPrice" onclick="toggleSort('avgPrice')">Avg. Price <span class="sort-arrow"></span></th>
+                            <th data-sort="currentPrice" onclick="toggleSort('currentPrice')">Current Price <span class="sort-arrow"></span></th>
+                            <th data-sort="marketValue" onclick="toggleSort('marketValue')">Market Value <span class="sort-arrow"></span></th>
+                            <th data-sort="gainLoss" onclick="toggleSort('gainLoss')">Gain/Loss <span class="sort-arrow"></span></th>
+                            <th data-sort="vpRatio" onclick="toggleSort('vpRatio')">V/P Ratio <span class="sort-arrow"></span></th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -561,6 +587,10 @@
         let usdIlsRate = null;
         let portfolioYields = {};
 
+        // Sort state
+        let sortColumn = null;  // null = original order
+        let sortAsc = true;
+
         // Render portfolio table
         function renderPortfolio() {
             const tbody = document.getElementById('portfolioBody');
@@ -590,19 +620,69 @@
                 totalPortfolioProfit += mv - cb;
             }
 
-            tbody.innerHTML = portfolio.map((stock, index) => {
+            // Build row data with sortable values
+            const rows = portfolio.map((stock, index) => {
                 const costBasis = stock.amount * stock.avgPrice;
                 const quote = MarketData.getCached(stock.name);
                 const hasPrice = quote && quote.price != null;
+                const currentPrice = hasPrice ? quote.price : null;
+                const marketValue = hasPrice ? stock.amount * currentPrice : null;
+                const gainLoss = hasPrice ? marketValue - costBasis : null;
+                let vpRatioVal = null;
+                if (hasPrice && totalPortfolioValue > 0 && totalPortfolioProfit !== 0 && gainLoss !== 0) {
+                    const valueWeightN = (marketValue * N) / totalPortfolioValue;
+                    const profitWeightN = (marketValue * N - costBasis * N) / totalPortfolioProfit;
+                    vpRatioVal = valueWeightN / profitWeightN;
+                }
+                return {
+                    index, stock, quote, costBasis, hasPrice, currentPrice, marketValue, gainLoss, vpRatioVal,
+                    sortValues: {
+                        name: stock.name.toLowerCase(),
+                        shares: stock.amount,
+                        avgPrice: stock.avgPrice,
+                        currentPrice: currentPrice != null ? currentPrice : -Infinity,
+                        marketValue: marketValue != null ? marketValue : -Infinity,
+                        gainLoss: gainLoss != null ? gainLoss : -Infinity,
+                        vpRatio: vpRatioVal != null ? vpRatioVal : -Infinity,
+                    }
+                };
+            });
+
+            // Sort if a column is selected
+            if (sortColumn) {
+                rows.sort((a, b) => {
+                    const va = a.sortValues[sortColumn];
+                    const vb = b.sortValues[sortColumn];
+                    let cmp;
+                    if (typeof va === 'string') {
+                        cmp = va.localeCompare(vb);
+                    } else {
+                        cmp = va - vb;
+                    }
+                    return sortAsc ? cmp : -cmp;
+                });
+            }
+
+            // Update header sort indicators
+            document.querySelectorAll('#portfolioTable th[data-sort]').forEach(th => {
+                const arrow = th.querySelector('.sort-arrow');
+                if (th.dataset.sort === sortColumn) {
+                    th.classList.add('sorted');
+                    arrow.textContent = sortAsc ? '\u25B2' : '\u25BC';
+                } else {
+                    th.classList.remove('sorted');
+                    arrow.textContent = '';
+                }
+            });
+
+            tbody.innerHTML = rows.map(row => {
+                const { index, stock, quote, costBasis, hasPrice, currentPrice, marketValue, gainLoss, vpRatioVal } = row;
                 const currSymbol = (quote && quote.currency === 'ILS') ? '\u20AA' : '$';
                 const displayName = (quote && quote.name) ? quote.name : '';
 
                 let currentPriceHtml, marketValueHtml, gainLossHtml, vpRatioHtml;
 
                 if (hasPrice) {
-                    const currentPrice = quote.price;
-                    const marketValue = stock.amount * currentPrice;
-                    const gainLoss = marketValue - costBasis;
                     const gainLossPct = costBasis > 0 ? (gainLoss / costBasis) * 100 : 0;
                     const cls = gainLoss > 0 ? 'price-up' : gainLoss < 0 ? 'price-down' : 'price-neutral';
                     const sign = gainLoss >= 0 ? '+' : '';
@@ -611,13 +691,9 @@
                     marketValueHtml = `<span class="${cls}">${currSymbol}${formatNumber(marketValue, 2)}</span>`;
                     gainLossHtml = `<span class="gain-loss ${cls}">${sign}${currSymbol}${formatNumber(gainLoss, 2)} (${sign}${gainLossPct.toFixed(1)}%)</span>`;
 
-                    // V/P Ratio: (value*N / totalValue) / ((value*N - buyValue*N) / totalProfit)
-                    if (totalPortfolioValue > 0 && totalPortfolioProfit !== 0 && gainLoss !== 0) {
-                        const valueWeightN = (marketValue * N) / totalPortfolioValue;
-                        const profitWeightN = (marketValue * N - costBasis * N) / totalPortfolioProfit;
-                        const vpRatio = valueWeightN / profitWeightN;
-                        const vpCls = vpRatio <= 1 ? 'price-up' : vpRatio > 2 ? 'price-down' : 'price-neutral';
-                        vpRatioHtml = `<span class="${vpCls}">${vpRatio.toFixed(2)}</span>`;
+                    if (vpRatioVal != null) {
+                        const vpCls = vpRatioVal <= 1 ? 'price-up' : vpRatioVal > 2 ? 'price-down' : 'price-neutral';
+                        vpRatioHtml = `<span class="${vpCls}">${vpRatioVal.toFixed(2)}</span>`;
                     } else {
                         vpRatioHtml = '<span class="price-neutral">--</span>';
                     }
@@ -844,6 +920,23 @@
                 progressArea.style.display = 'none';
                 renderPortfolio();
             }
+        }
+
+        // Toggle sort by column
+        function toggleSort(column) {
+            if (sortColumn === column) {
+                if (sortAsc) {
+                    sortAsc = false;
+                } else {
+                    // Third click: reset to original order
+                    sortColumn = null;
+                    sortAsc = true;
+                }
+            } else {
+                sortColumn = column;
+                sortAsc = true;
+            }
+            renderPortfolio();
         }
 
         // Format number with commas and decimals
