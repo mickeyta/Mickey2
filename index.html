@@ -632,10 +632,10 @@
                 const gainLoss = hasPrice ? marketValue - costBasis : null;
                 let vRatioVal = null, pRatioVal = null, vpRatioVal = null;
                 if (hasPrice && totalPortfolioValue > 0) {
-                    vRatioVal = (marketValue * N) / totalPortfolioValue;
+                    vRatioVal = marketValue / totalPortfolioValue;
                 }
                 if (hasPrice && totalPortfolioProfit !== 0 && gainLoss !== 0) {
-                    pRatioVal = (marketValue * N - costBasis * N) / totalPortfolioProfit;
+                    pRatioVal = gainLoss / totalPortfolioProfit;
                 }
                 if (vRatioVal != null && pRatioVal != null && pRatioVal !== 0) {
                     vpRatioVal = vRatioVal / pRatioVal;
@@ -701,8 +701,8 @@
                     marketValueHtml = `<span class="${cls}">${currSymbol}${formatNumber(marketValue, 2)}</span>`;
                     gainLossHtml = `<span class="gain-loss ${cls}">${sign}${currSymbol}${formatNumber(gainLoss, 2)} (${sign}${gainLossPct.toFixed(1)}%)</span>`;
 
-                    vRatioHtml = vRatioVal != null ? vRatioVal.toFixed(2) : dash;
-                    pRatioHtml = pRatioVal != null ? pRatioVal.toFixed(2) : dash;
+                    vRatioHtml = vRatioVal != null ? (vRatioVal * 100).toFixed(1) + '%' : dash;
+                    pRatioHtml = pRatioVal != null ? (pRatioVal * 100).toFixed(1) + '%' : dash;
                     if (vpRatioVal != null) {
                         const vpCls = vpRatioVal <= 1 ? 'price-up' : vpRatioVal > 2 ? 'price-down' : 'price-neutral';
                         vpRatioHtml = `<span class="${vpCls}">${vpRatioVal.toFixed(2)}</span>`;
