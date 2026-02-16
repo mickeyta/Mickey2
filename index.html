@@ -486,7 +486,9 @@
                             <th data-sort="currentPrice" onclick="toggleSort('currentPrice')">Current Price <span class="sort-arrow"></span></th>
                             <th data-sort="marketValue" onclick="toggleSort('marketValue')">Market Value <span class="sort-arrow"></span></th>
                             <th data-sort="gainLoss" onclick="toggleSort('gainLoss')">Gain/Loss <span class="sort-arrow"></span></th>
-                            <th data-sort="vpRatio" onclick="toggleSort('vpRatio')">V/P Ratio <span class="sort-arrow"></span></th>
+                            <th data-sort="vRatio" onclick="toggleSort('vRatio')">V <span class="sort-arrow"></span></th>
+                            <th data-sort="pRatio" onclick="toggleSort('pRatio')">P <span class="sort-arrow"></span></th>
+                            <th data-sort="vpRatio" onclick="toggleSort('vpRatio')">V/P <span class="sort-arrow"></span></th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -628,14 +630,19 @@
                 const currentPrice = hasPrice ? quote.price : null;
                 const marketValue = hasPrice ? stock.amount * currentPrice : null;
                 const gainLoss = hasPrice ? marketValue - costBasis : null;
-                let vpRatioVal = null;
-                if (hasPrice && totalPortfolioValue > 0 && totalPortfolioProfit !== 0 && gainLoss !== 0) {
-                    const valueWeightN = (marketValue * N) / totalPortfolioValue;
-                    const profitWeightN = (marketValue * N - costBasis * N) / totalPortfolioProfit;
-                    vpRatioVal = valueWeightN / profitWeightN;
+                let vRatioVal = null, pRatioVal = null, vpRatioVal = null;
+                if (hasPrice && totalPortfolioValue > 0) {
+                    vRatioVal = (marketValue * N) / totalPortfolioValue;
+                }
+                if (hasPrice && totalPortfolioProfit !== 0 && gainLoss !== 0) {
+                    pRatioVal = (marketValue * N - costBasis * N) / totalPortfolioProfit;
+                }
+                if (vRatioVal != null && pRatioVal != null && pRatioVal !== 0) {
+                    vpRatioVal = vRatioVal / pRatioVal;
                 }
                 return {
-                    index, stock, quote, costBasis, hasPrice, currentPrice, marketValue, gainLoss, vpRatioVal,
+                    index, stock, quote, costBasis, hasPrice, currentPrice, marketValue, gainLoss,
+                    vRatioVal, pRatioVal, vpRatioVal,
                     sortValues: {
                         name: stock.name.toLowerCase(),
                         shares: stock.amount,
@@ -643,6 +650,8 @@
                         currentPrice: currentPrice != null ? currentPrice : -Infinity,
                         marketValue: marketValue != null ? marketValue : -Infinity,
                         gainLoss: gainLoss != null ? gainLoss : -Infinity,
+                        vRatio: vRatioVal != null ? vRatioVal : -Infinity,
+                        pRatio: pRatioVal != null ? pRatioVal : -Infinity,
                         vpRatio: vpRatioVal != null ? vpRatioVal : -Infinity,
                     }
                 };
@@ -676,11 +685,12 @@
             });
 
             tbody.innerHTML = rows.map(row => {
-                const { index, stock, quote, costBasis, hasPrice, currentPrice, marketValue, gainLoss, vpRatioVal } = row;
+                const { index, stock, quote, costBasis, hasPrice, currentPrice, marketValue, gainLoss, vRatioVal, pRatioVal, vpRatioVal } = row;
                 const currSymbol = (quote && quote.currency === 'ILS') ? '\u20AA' : '$';
                 const displayName = (quote && quote.name) ? quote.name : '';
 
-                let currentPriceHtml, marketValueHtml, gainLossHtml, vpRatioHtml;
+                let currentPriceHtml, marketValueHtml, gainLossHtml, vRatioHtml, pRatioHtml, vpRatioHtml;
+                const dash = '<span class="price-neutral">--</span>';
 
                 if (hasPrice) {
                     const gainLossPct = costBasis > 0 ? (gainLoss / costBasis) * 100 : 0;
@@ -691,17 +701,21 @@
                     marketValueHtml = `<span class="${cls}">${currSymbol}${formatNumber(marketValue, 2)}</span>`;
                     gainLossHtml = `<span class="gain-loss ${cls}">${sign}${currSymbol}${formatNumber(gainLoss, 2)} (${sign}${gainLossPct.toFixed(1)}%)</span>`;
 
+                    vRatioHtml = vRatioVal != null ? vRatioVal.toFixed(2) : dash;
+                    pRatioHtml = pRatioVal != null ? pRatioVal.toFixed(2) : dash;
                     if (vpRatioVal != null) {
                         const vpCls = vpRatioVal <= 1 ? 'price-up' : vpRatioVal > 2 ? 'price-down' : 'price-neutral';
                         vpRatioHtml = `<span class="${vpCls}">${vpRatioVal.toFixed(2)}</span>`;
                     } else {
-                        vpRatioHtml = '<span class="price-neutral">--</span>';
+                        vpRatioHtml = dash;
                     }
                 } else {
                     currentPriceHtml = marketDataLoaded ? '<span class="price-neutral">N/A</span>' : '<span class="price-pending">--</span>';
                     marketValueHtml = `${currSymbol}${formatNumber(costBasis, 2)}`;
-                    gainLossHtml = '<span class="price-neutral">--</span>';
-                    vpRatioHtml = '<span class="price-neutral">--</span>';
+                    gainLossHtml = dash;
+                    vRatioHtml = dash;
+                    pRatioHtml = dash;
+                    vpRatioHtml = dash;
                 }
 
                 return `
@@ -712,6 +726,8 @@
                         <td>${currentPriceHtml}</td>
                         <td class="total-value">${marketValueHtml}</td>
                         <td>${gainLossHtml}</td>
+                        <td>${vRatioHtml}</td>
+                        <td>${pRatioHtml}</td>
                         <td>${vpRatioHtml}</td>
                         <td class="actions-cell">
                             <button class="btn btn-secondary btn-small" onclick="editStock(${index})">Edit</button>
