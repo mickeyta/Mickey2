@@ -548,10 +548,12 @@
                 <div class="summary-item">
                     <div class="label">YTD Yield</div>
                     <div class="value" id="ytdYield">--</div>
+                    <div class="value-secondary" id="ytdYieldILS"></div>
                 </div>
                 <div class="summary-item">
                     <div class="label">Last Year Yield</div>
                     <div class="value" id="lastYearYield">--</div>
+                    <div class="value-secondary" id="lastYearYieldILS"></div>
                 </div>
             </div>
 
@@ -563,11 +565,19 @@
                     <thead>
                         <tr>
                             <th></th>
-                            <th>1 Day</th>
-                            <th>5 Days</th>
-                            <th>1 Month</th>
-                            <th>YTD</th>
-                            <th>1 Year</th>
+                            <th colspan="2">1 Day</th>
+                            <th colspan="2">5 Days</th>
+                            <th colspan="2">1 Month</th>
+                            <th colspan="2">YTD</th>
+                            <th colspan="2">1 Year</th>
+                        </tr>
+                        <tr>
+                            <th></th>
+                            <th>$</th><th style="color:#8892b0;">\u20AA</th>
+                            <th>$</th><th style="color:#8892b0;">\u20AA</th>
+                            <th>$</th><th style="color:#8892b0;">\u20AA</th>
+                            <th>$</th><th style="color:#8892b0;">\u20AA</th>
+                            <th>$</th><th style="color:#8892b0;">\u20AA</th>
                         </tr>
                     </thead>
                     <tbody id="benchmarkBody"></tbody>
@@ -882,50 +892,64 @@
         }
 
         function updateYieldSummary(totalMarketUSD, totalMarketILS) {
-            let ytdWeighted = 0, ytdTotal = 0;
-            let oneYWeighted = 0, oneYTotal = 0;
+            // USD/ILS rate changes from benchmark data
+            const fx = benchmarkData && benchmarkData['USDILS=X'] ? benchmarkData['USDILS=X'] : {};
+
+            let ytdWUSD = 0, ytdT = 0, ytdWILS = 0, ytdTILS = 0;
+            let oneYWUSD = 0, oneYT = 0, oneYWILS = 0, oneYTILS = 0;
 
             for (const stock of portfolio) {
                 const quote = MarketData.getCached(stock.name);
                 const isILS = quote && quote.currency === 'ILS';
                 const hasPrice = quote && quote.price != null;
                 const price = hasPrice ? quote.price : stock.avgPrice;
-                var value = stock.amount * price;
-                // Normalize to USD for weighting
-                if (isILS && usdIlsRate) value = value / usdIlsRate;
+                let valueUSD = stock.amount * price;
+                if (isILS && usdIlsRate) valueUSD = valueUSD / usdIlsRate;
 
                 const y = portfolioYields[stock.name.toUpperCase()];
                 if (y) {
                     if (y.ytd != null) {
-                        ytdWeighted += y.ytd * value;
-                        ytdTotal += value;
+                        const retNative = y.ytd;
+                        let retUSD, retILS;
+                        if (isILS) {
+                            retILS = retNative;
+                            retUSD = fx.ytd != null ? ((1 + retNative / 100) / (1 + fx.ytd / 100) - 1) * 100 : retNative;
+                        } else {
+                            retUSD = retNative;
+                            retILS = fx.ytd != null ? ((1 + retNative / 100) * (1 + fx.ytd / 100) - 1) * 100 : null;
+                        }
+                        ytdWUSD += retUSD * valueUSD;
+                        ytdT += valueUSD;
+                        if (retILS != null) { ytdWILS += retILS * valueUSD; ytdTILS += valueUSD; }
                     }
                     if (y.oneYear != null) {
-                        oneYWeighted += y.oneYear * value;
-                        oneYTotal += value;
+                        const retNative = y.oneYear;
+                        let retUSD, retILS;
+                        if (isILS) {
+                            retILS = retNative;
+                            retUSD = fx['1y'] != null ? ((1 + retNative / 100) / (1 + fx['1y'] / 100) - 1) * 100 : retNative;
+                        } else {
+                            retUSD = retNative;
+                            retILS = fx['1y'] != null ? ((1 + retNative / 100) * (1 + fx['1y'] / 100) - 1) * 100 : null;
+                        }
+                        oneYWUSD += retUSD * valueUSD;
+                        oneYT += valueUSD;
+                        if (retILS != null) { oneYWILS += retILS * valueUSD; oneYTILS += valueUSD; }
                     }
                 }
             }
 
-            if (ytdTotal > 0) {
-                const ytdPct = ytdWeighted / ytdTotal;
-                const cls = ytdPct > 0 ? 'price-up' : ytdPct < 0 ? 'price-down' : 'price-neutral';
-                const sign = ytdPct >= 0 ? '+' : '';
-                document.getElementById('ytdYield').innerHTML =
-                    '<span class="' + cls + '">' + sign + ytdPct.toFixed(2) + '%</span>';
-            } else {
-                document.getElementById('ytdYield').textContent = '--';
+            function fmtYield(el, pct) {
+                if (pct == null) { el.textContent = '--'; return; }
+                const cls = pct > 0 ? 'price-up' : pct < 0 ? 'price-down' : 'price-neutral';
+                const sign = pct >= 0 ? '+' : '';
+                el.innerHTML = '<span class="' + cls + '">' + sign + pct.toFixed(2) + '%</span>';
             }
 
-            if (oneYTotal > 0) {
-                const oneYPct = oneYWeighted / oneYTotal;
-                const cls = oneYPct > 0 ? 'price-up' : oneYPct < 0 ? 'price-down' : 'price-neutral';
-                const sign = oneYPct >= 0 ? '+' : '';
-                document.getElementById('lastYearYield').innerHTML =
-                    '<span class="' + cls + '">' + sign + oneYPct.toFixed(2) + '%</span>';
-            } else {
-                document.getElementById('lastYearYield').textContent = '--';
-            }
+            fmtYield(document.getElementById('ytdYield'), ytdT > 0 ? ytdWUSD / ytdT : null);
+            fmtYield(document.getElementById('ytdYieldILS'), ytdTILS > 0 ? ytdWILS / ytdTILS : null);
+            fmtYield(document.getElementById('lastYearYield'), oneYT > 0 ? oneYWUSD / oneYT : null);
+            fmtYield(document.getElementById('lastYearYieldILS'), oneYTILS > 0 ? oneYWILS / oneYTILS : null);
         }
 
         function updateBenchmarkComparison() {
@@ -936,32 +960,61 @@
                 return;
             }
 
-            // Compute weighted portfolio returns for each period
-            const periods = [
-                { key: 'day1', label: '1d' },
-                { key: 'day5', label: '5d' },
-                { key: 'month1', label: '1mo' },
-                { key: 'ytd', label: 'ytd' },
-                { key: 'oneYear', label: '1y' },
-            ];
-            const portfolioReturns = {};
-            for (const p of periods) {
-                let weighted = 0, total = 0;
+            // USD/ILS rate change per period (from USDILS=X benchmark)
+            const fx = benchmarkData['USDILS=X'] || {};
+            const benchKeys = ['1d', '5d', '1mo', 'ytd', '1y'];
+            const portKeys = ['day1', 'day5', 'month1', 'ytd', 'oneYear'];
+
+            // Convert a USD return to ILS: (1+usd_ret)*(1+fx_ret)-1
+            function toILS(usdPct, periodKey) {
+                if (usdPct == null) return null;
+                const fxPct = fx[periodKey];
+                if (fxPct == null) return null;
+                return ((1 + usdPct / 100) * (1 + fxPct / 100) - 1) * 100;
+            }
+
+            // Compute weighted portfolio returns (USD and ILS) for each period
+            const portfolioUSD = {};
+            const portfolioILS = {};
+            for (let pi = 0; pi < portKeys.length; pi++) {
+                const pk = portKeys[pi];
+                const bk = benchKeys[pi];
+                let wUSD = 0, tUSD = 0;
+                let wILS = 0, tILS = 0;
                 for (const stock of portfolio) {
                     const quote = MarketData.getCached(stock.name);
                     const isILS = quote && quote.currency === 'ILS';
                     const hasPrice = quote && quote.price != null;
                     const price = hasPrice ? quote.price : stock.avgPrice;
-                    let value = stock.amount * price;
-                    if (isILS && usdIlsRate) value = value / usdIlsRate;
+                    let valueUSD = stock.amount * price;
+                    if (isILS && usdIlsRate) valueUSD = valueUSD / usdIlsRate;
 
                     const y = portfolioYields[stock.name.toUpperCase()];
-                    if (y && y[p.key] != null) {
-                        weighted += y[p.key] * value;
-                        total += value;
+                    if (y && y[pk] != null) {
+                        // USD return: for ILS stocks convert ILS return to USD, for USD stocks use as-is
+                        const stockReturnNative = y[pk]; // return in stock's native currency
+                        let stockReturnUSD, stockReturnILS;
+                        if (isILS) {
+                            stockReturnILS = stockReturnNative;
+                            // Convert ILS return to USD: (1+ils_ret)/(1+fx_ret)-1
+                            const fxPct = fx[bk];
+                            stockReturnUSD = fxPct != null
+                                ? ((1 + stockReturnNative / 100) / (1 + fxPct / 100) - 1) * 100
+                                : stockReturnNative;
+                        } else {
+                            stockReturnUSD = stockReturnNative;
+                            stockReturnILS = toILS(stockReturnNative, bk);
+                        }
+                        wUSD += stockReturnUSD * valueUSD;
+                        tUSD += valueUSD;
+                        if (stockReturnILS != null) {
+                            wILS += stockReturnILS * valueUSD;
+                            tILS += valueUSD;
+                        }
                     }
                 }
-                portfolioReturns[p.key] = total > 0 ? weighted / total : null;
+                portfolioUSD[pk] = tUSD > 0 ? wUSD / tUSD : null;
+                portfolioILS[pk] = tILS > 0 ? wILS / tILS : null;
             }
 
             function fmtCell(val) {
@@ -971,34 +1024,49 @@
                 return '<td><span class="' + cls + '">' + sign + val.toFixed(2) + '%</span></td>';
             }
 
-            function fmtDiffCell(portfolio, benchmark) {
-                if (portfolio == null || benchmark == null) return '<td><span class="price-neutral">--</span></td>';
-                const diff = portfolio - benchmark;
+            function fmtDiffCell(portVal, benchVal) {
+                if (portVal == null || benchVal == null) return '<td><span class="price-neutral">--</span></td>';
+                const diff = portVal - benchVal;
                 const cls = diff > 0 ? 'price-up' : diff < 0 ? 'price-down' : 'price-neutral';
                 const sign = diff >= 0 ? '+' : '';
                 return '<td><span class="' + cls + '">' + sign + diff.toFixed(2) + '%</span></td>';
             }
 
-            const benchKeys = ['1d', '5d', '1mo', 'ytd', '1y'];
-            const portKeys = ['day1', 'day5', 'month1', 'ytd', 'oneYear'];
-
+            // Portfolio row (USD + ILS)
             let html = '<tr><td class="stock-name">Portfolio</td>';
-            for (const pk of portKeys) html += fmtCell(portfolioReturns[pk]);
+            for (let i = 0; i < portKeys.length; i++) {
+                html += fmtCell(portfolioUSD[portKeys[i]]);
+                html += fmtCell(portfolioILS[portKeys[i]]);
+            }
             html += '</tr>';
 
+            // QQQ, SPY rows (USD + ILS)
             for (const sym of ['QQQ', 'SPY']) {
                 const b = benchmarkData[sym];
                 html += '<tr><td class="stock-name">' + sym + '</td>';
-                for (const bk of benchKeys) html += fmtCell(b ? b[bk] : null);
+                for (const bk of benchKeys) {
+                    html += fmtCell(b ? b[bk] : null);
+                    html += fmtCell(toILS(b ? b[bk] : null, bk));
+                }
                 html += '</tr>';
             }
 
-            // Diff rows
+            // USD/ILS row
+            html += '<tr><td class="stock-name">USD/ILS</td>';
+            for (const bk of benchKeys) {
+                html += fmtCell(fx[bk] != null ? fx[bk] : null);
+                html += '<td></td>';
+            }
+            html += '</tr>';
+
+            // Diff rows (USD + ILS)
             for (const sym of ['QQQ', 'SPY']) {
                 const b = benchmarkData[sym];
                 html += '<tr style="border-top: 1px solid rgba(255,255,255,0.1);"><td class="stock-name" style="font-size:0.85rem;">vs ' + sym + '</td>';
                 for (let i = 0; i < benchKeys.length; i++) {
-                    html += fmtDiffCell(portfolioReturns[portKeys[i]], b ? b[benchKeys[i]] : null);
+                    const bVal = b ? b[benchKeys[i]] : null;
+                    html += fmtDiffCell(portfolioUSD[portKeys[i]], bVal);
+                    html += fmtDiffCell(portfolioILS[portKeys[i]], toILS(bVal, benchKeys[i]));
                 }
                 html += '</tr>';
             }

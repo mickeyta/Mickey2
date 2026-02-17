@@ -214,7 +214,7 @@ http.createServer(async function (req, res) {
     if (url.pathname === '/api/yahoo/benchmarks') {
         console.log('[BENCHMARKS] fetching QQQ and SPY performance');
         var t0b = Date.now();
-        var benchSymbols = ['QQQ', 'SPY'];
+        var benchSymbols = ['QQQ', 'SPY', 'USDILS=X'];
         var ranges = [
             { key: '1d', range: '1d', interval: '5m' },
             { key: '5d', range: '5d', interval: '1d' },
