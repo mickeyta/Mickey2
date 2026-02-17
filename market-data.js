@@ -357,10 +357,7 @@ const MarketData = (function () {
                     for (var j = 0; j < yahooSymbols.length; j++) {
                         var sym = yahooSymbols[j];
                         if (data && data[sym]) {
-                            result[sym] = {
-                                ytd: data[sym].ytd != null ? data[sym].ytd : null,
-                                oneYear: data[sym].oneYear != null ? data[sym].oneYear : null,
-                            };
+                            result[sym] = data[sym];
                         } else {
                             result[sym] = { ytd: null, oneYear: null };
                         }

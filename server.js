@@ -250,16 +250,17 @@ http.createServer(async function (req, res) {
                 try {
                     var json = JSON.parse(ar.body);
                     var meta = json.chart && json.chart.result && json.chart.result[0] && json.chart.result[0].meta;
-                    var opens = json.chart && json.chart.result && json.chart.result[0] &&
-                        json.chart.result[0].indicators && json.chart.result[0].indicators.quote &&
-                        json.chart.result[0].indicators.quote[0] && json.chart.result[0].indicators.quote[0].open;
-                    var startPrice = null;
-                    if (opens) {
-                        for (var oi = 0; oi < opens.length; oi++) {
-                            if (opens[oi] != null) { startPrice = opens[oi]; break; }
+                    var startPrice = meta ? meta.chartPreviousClose : null;
+                    if (!startPrice) {
+                        var opens = json.chart && json.chart.result && json.chart.result[0] &&
+                            json.chart.result[0].indicators && json.chart.result[0].indicators.quote &&
+                            json.chart.result[0].indicators.quote[0] && json.chart.result[0].indicators.quote[0].open;
+                        if (opens) {
+                            for (var oi = 0; oi < opens.length; oi++) {
+                                if (opens[oi] != null) { startPrice = opens[oi]; break; }
+                            }
                         }
                     }
-                    if (!startPrice && meta) startPrice = meta.chartPreviousClose;
                     var curPrice = meta ? meta.regularMarketPrice : null;
                     if (startPrice && curPrice && startPrice > 0) {
                         benchResult[ar.sym][ar.key] = ((curPrice - startPrice) / startPrice) * 100;
@@ -298,14 +299,19 @@ http.createServer(async function (req, res) {
         function _extractReturn(chartJson) {
             if (!chartJson || !chartJson.chart || !chartJson.chart.result || !chartJson.chart.result[0]) return null;
             var m = chartJson.chart.result[0].meta;
-            var opArr = chartJson.chart.result[0].indicators &&
-                chartJson.chart.result[0].indicators.quote &&
-                chartJson.chart.result[0].indicators.quote[0] &&
-                chartJson.chart.result[0].indicators.quote[0].open;
-            var sp = null;
-            if (opArr) { for (var i2 = 0; i2 < opArr.length; i2++) { if (opArr[i2] != null) { sp = opArr[i2]; break; } } }
-            if (!sp && m) sp = m.chartPreviousClose;
-            var cp = m ? m.regularMarketPrice : null;
+            if (!m) return null;
+            // chartPreviousClose is the close price right before the range started — most reliable reference
+            var sp = m.chartPreviousClose;
+            if (!sp) {
+                // Fallback to first non-null open
+                var opArr = chartJson.chart.result[0].indicators &&
+                    chartJson.chart.result[0].indicators.quote &&
+                    chartJson.chart.result[0].indicators.quote[0] &&
+                    chartJson.chart.result[0].indicators.quote[0].open;
+                if (opArr) { for (var i2 = 0; i2 < opArr.length; i2++) { if (opArr[i2] != null) { sp = opArr[i2]; break; } } }
+            }
+            var cp = m.regularMarketPrice;
+            // Handle ILA (agorot) currency — both sp and cp should be in same unit from chart API
             if (sp && cp && sp > 0) return ((cp - sp) / sp) * 100;
             return null;
         }
@@ -342,6 +348,7 @@ http.createServer(async function (req, res) {
                         else if (rr.key === '5d') entry.day5 = ret;
                         else if (rr.key === '1mo') entry.month1 = ret;
                     }
+                    if (entry.oneYear != null) console.log('  ' + sym2 + ': 1Y=' + entry.oneYear.toFixed(2) + '%');
                     yieldsResult[sym2] = entry;
                 } else {
                     yieldsResult[sym2] = null;
