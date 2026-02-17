@@ -112,6 +112,48 @@ function sendJson(res, status, data) {
     res.end(JSON.stringify(data));
 }
 
+// Yahoo crumb/cookie authentication for v7/v10 APIs
+var _yahooCrumb = null;
+var _yahooCookie = null;
+var _yahooCrumbTs = 0;
+var _CRUMB_TTL = 3600000; // 1 hour
+
+async function getYahooCrumb() {
+    if (_yahooCrumb && _yahooCookie && (Date.now() - _yahooCrumbTs < _CRUMB_TTL)) {
+        return { crumb: _yahooCrumb, cookie: _yahooCookie };
+    }
+    // Step 1: GET fc.yahoo.com to obtain cookies
+    try {
+        var resp1 = await httpsGet('https://fc.yahoo.com/', YAHOO_HEADERS, 8000);
+        var setCookies = resp1.headers['set-cookie'];
+        if (!setCookies) {
+            console.log('[YAHOO CRUMB] No cookies from fc.yahoo.com');
+            return null;
+        }
+        // Extract cookie values
+        var cookieArr = Array.isArray(setCookies) ? setCookies : [setCookies];
+        var cookies = cookieArr.map(function (c) { return c.split(';')[0]; }).join('; ');
+
+        // Step 2: GET crumb using cookies
+        var crumbHeaders = Object.assign({}, YAHOO_HEADERS, { 'Cookie': cookies });
+        var resp2 = await httpsGet('https://query2.finance.yahoo.com/v1/test/getcrumb', crumbHeaders, 8000);
+        if (resp2.status === 200) {
+            var crumb = resp2.body.toString().trim();
+            if (crumb && crumb.length < 50) {
+                _yahooCrumb = crumb;
+                _yahooCookie = cookies;
+                _yahooCrumbTs = Date.now();
+                console.log('[YAHOO CRUMB] obtained crumb: ' + crumb.substring(0, 8) + '...');
+                return { crumb: _yahooCrumb, cookie: _yahooCookie };
+            }
+        }
+        console.log('[YAHOO CRUMB] getcrumb returned HTTP ' + resp2.status);
+    } catch (e) {
+        console.log('[YAHOO CRUMB] error: ' + e.message);
+    }
+    return null;
+}
+
 http.createServer(async function (req, res) {
   try {
     var url = new URL(req.url, 'http://localhost');
@@ -241,7 +283,7 @@ http.createServer(async function (req, res) {
         return;
     }
 
-    // Yahoo P/E ratios: fetch trailingPE for multiple symbols via v7 quote API
+    // Yahoo P/E ratios: fetch trailingPE for multiple symbols via v7 quote API (with crumb auth)
     if (url.pathname === '/api/yahoo/pe') {
         var pSyms = (url.searchParams.get('symbols') || '').split(',').filter(Boolean);
         if (pSyms.length === 0) { sendJson(res, 400, { error: 'No symbols' }); return; }
@@ -249,31 +291,38 @@ http.createServer(async function (req, res) {
         var t0pe = Date.now();
         var peResult = {};
 
-        // v7 quote API supports multiple symbols in one request
-        var peUrl = 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' +
-            pSyms.map(encodeURIComponent).join(',') + '&fields=trailingPE,forwardPE';
-        try {
-            var peResp = await httpsGet(peUrl, YAHOO_HEADERS, 15000);
-            if (peResp.status === 200) {
-                var peJson = JSON.parse(peResp.body.toString());
-                var quotes = peJson && peJson.quoteResponse && peJson.quoteResponse.result;
-                if (quotes) {
-                    for (var qi = 0; qi < quotes.length; qi++) {
-                        var q = quotes[qi];
-                        var qSym = q.symbol ? q.symbol.toUpperCase() : null;
-                        if (qSym) {
-                            peResult[qSym] = {
-                                trailingPE: q.trailingPE != null ? q.trailingPE : null,
-                                forwardPE: q.forwardPE != null ? q.forwardPE : null,
-                            };
+        var auth = await getYahooCrumb();
+        if (auth) {
+            var peUrl = 'https://query2.finance.yahoo.com/v7/finance/quote?symbols=' +
+                pSyms.map(encodeURIComponent).join(',') +
+                '&fields=trailingPE,forwardPE&crumb=' + encodeURIComponent(auth.crumb);
+            var peHeaders = Object.assign({}, YAHOO_HEADERS, { 'Cookie': auth.cookie });
+            try {
+                var peResp = await httpsGet(peUrl, peHeaders, 15000);
+                if (peResp.status === 200) {
+                    var peJson = JSON.parse(peResp.body.toString());
+                    var quotes = peJson && peJson.quoteResponse && peJson.quoteResponse.result;
+                    if (quotes) {
+                        for (var qi = 0; qi < quotes.length; qi++) {
+                            var q = quotes[qi];
+                            var qSym = q.symbol ? q.symbol.toUpperCase() : null;
+                            if (qSym) {
+                                peResult[qSym] = {
+                                    trailingPE: q.trailingPE != null ? q.trailingPE : null,
+                                    forwardPE: q.forwardPE != null ? q.forwardPE : null,
+                                };
+                            }
                         }
                     }
+                } else {
+                    console.log('[YAHOO PE] v7 returned HTTP ' + peResp.status + ', invalidating crumb');
+                    _yahooCrumb = null; // force refresh next time
                 }
-            } else {
-                console.log('[YAHOO PE] v7 returned HTTP ' + peResp.status);
+            } catch (e) {
+                console.log('[YAHOO PE] fetch error: ' + e.message);
             }
-        } catch (e) {
-            console.log('[YAHOO PE] fetch error: ' + e.message);
+        } else {
+            console.log('[YAHOO PE] could not obtain crumb, skipping');
         }
 
         // Fill in missing symbols with null
