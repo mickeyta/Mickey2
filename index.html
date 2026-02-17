@@ -554,6 +554,26 @@
                     <div class="value" id="lastYearYield">--</div>
                 </div>
             </div>
+
+            <!-- Benchmark Comparison -->
+            <div id="benchmarkSection" style="display:none; margin-top: 20px;">
+                <h3 style="color:#fff; margin-bottom: 12px; font-size: 1.1rem;">Portfolio vs Benchmarks</h3>
+                <div class="table-wrapper">
+                <table id="benchmarkTable" style="width:100%;">
+                    <thead>
+                        <tr>
+                            <th></th>
+                            <th>1 Day</th>
+                            <th>5 Days</th>
+                            <th>1 Month</th>
+                            <th>YTD</th>
+                            <th>1 Year</th>
+                        </tr>
+                    </thead>
+                    <tbody id="benchmarkBody"></tbody>
+                </table>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -607,6 +627,7 @@
         let usdIlsRate = null;
         let portfolioYields = {};
         let portfolioPE = {};
+        let benchmarkData = null;
 
         // Sort state
         let sortColumn = null;  // null = original order
@@ -857,6 +878,7 @@
 
             // YTD and Last Year yields (weighted by market value)
             updateYieldSummary(marketValueUSD, marketValueILS);
+            updateBenchmarkComparison();
         }
 
         function updateYieldSummary(totalMarketUSD, totalMarketILS) {
@@ -904,6 +926,85 @@
             } else {
                 document.getElementById('lastYearYield').textContent = '--';
             }
+        }
+
+        function updateBenchmarkComparison() {
+            const section = document.getElementById('benchmarkSection');
+            const tbody = document.getElementById('benchmarkBody');
+            if (!benchmarkData || portfolio.length === 0) {
+                section.style.display = 'none';
+                return;
+            }
+
+            // Compute weighted portfolio returns for each period
+            const periods = [
+                { key: 'day1', label: '1d' },
+                { key: 'day5', label: '5d' },
+                { key: 'month1', label: '1mo' },
+                { key: 'ytd', label: 'ytd' },
+                { key: 'oneYear', label: '1y' },
+            ];
+            const portfolioReturns = {};
+            for (const p of periods) {
+                let weighted = 0, total = 0;
+                for (const stock of portfolio) {
+                    const quote = MarketData.getCached(stock.name);
+                    const isILS = quote && quote.currency === 'ILS';
+                    const hasPrice = quote && quote.price != null;
+                    const price = hasPrice ? quote.price : stock.avgPrice;
+                    let value = stock.amount * price;
+                    if (isILS && usdIlsRate) value = value / usdIlsRate;
+
+                    const y = portfolioYields[stock.name.toUpperCase()];
+                    if (y && y[p.key] != null) {
+                        weighted += y[p.key] * value;
+                        total += value;
+                    }
+                }
+                portfolioReturns[p.key] = total > 0 ? weighted / total : null;
+            }
+
+            function fmtCell(val) {
+                if (val == null) return '<td><span class="price-neutral">--</span></td>';
+                const cls = val > 0 ? 'price-up' : val < 0 ? 'price-down' : 'price-neutral';
+                const sign = val >= 0 ? '+' : '';
+                return '<td><span class="' + cls + '">' + sign + val.toFixed(2) + '%</span></td>';
+            }
+
+            function fmtDiffCell(portfolio, benchmark) {
+                if (portfolio == null || benchmark == null) return '<td><span class="price-neutral">--</span></td>';
+                const diff = portfolio - benchmark;
+                const cls = diff > 0 ? 'price-up' : diff < 0 ? 'price-down' : 'price-neutral';
+                const sign = diff >= 0 ? '+' : '';
+                return '<td><span class="' + cls + '">' + sign + diff.toFixed(2) + '%</span></td>';
+            }
+
+            const benchKeys = ['1d', '5d', '1mo', 'ytd', '1y'];
+            const portKeys = ['day1', 'day5', 'month1', 'ytd', 'oneYear'];
+
+            let html = '<tr><td class="stock-name">Portfolio</td>';
+            for (const pk of portKeys) html += fmtCell(portfolioReturns[pk]);
+            html += '</tr>';
+
+            for (const sym of ['QQQ', 'SPY']) {
+                const b = benchmarkData[sym];
+                html += '<tr><td class="stock-name">' + sym + '</td>';
+                for (const bk of benchKeys) html += fmtCell(b ? b[bk] : null);
+                html += '</tr>';
+            }
+
+            // Diff rows
+            for (const sym of ['QQQ', 'SPY']) {
+                const b = benchmarkData[sym];
+                html += '<tr style="border-top: 1px solid rgba(255,255,255,0.1);"><td class="stock-name" style="font-size:0.85rem;">vs ' + sym + '</td>';
+                for (let i = 0; i < benchKeys.length; i++) {
+                    html += fmtDiffCell(portfolioReturns[portKeys[i]], b ? b[benchKeys[i]] : null);
+                }
+                html += '</tr>';
+            }
+
+            tbody.innerHTML = html;
+            section.style.display = 'block';
         }
 
         // Refresh market data for all stocks in the portfolio
@@ -954,12 +1055,13 @@
                 clearInterval(pulseInterval);
                 marketDataLoaded = true;
 
-                // Fetch exchange rate, yields, and P/E ratios in parallel
-                progressText.textContent = 'Fetching rates, yields & P/E...';
-                var [rateResult, yieldsResult, peResult] = await Promise.allSettled([
+                // Fetch exchange rate, yields, P/E, and benchmarks in parallel
+                progressText.textContent = 'Fetching rates, yields, P/E & benchmarks...';
+                var [rateResult, yieldsResult, peResult, benchResult] = await Promise.allSettled([
                     MarketData.fetchExchangeRate(),
                     MarketData.fetchYields(symbols),
                     MarketData.fetchPERatios(symbols),
+                    MarketData.fetchBenchmarks(),
                 ]);
                 if (rateResult.status === 'fulfilled' && rateResult.value) {
                     usdIlsRate = rateResult.value;
@@ -969,6 +1071,9 @@
                 }
                 if (peResult.status === 'fulfilled' && peResult.value) {
                     portfolioPE = peResult.value;
+                }
+                if (benchResult.status === 'fulfilled' && benchResult.value) {
+                    benchmarkData = benchResult.value;
                 }
 
                 const now = new Date();

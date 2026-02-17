@@ -210,7 +210,76 @@ http.createServer(async function (req, res) {
         return;
     }
 
-    // Yahoo yields: fetch YTD and 1Y returns for multiple symbols
+    // Benchmark performance: fetch returns for QQQ and SPY across multiple time ranges
+    if (url.pathname === '/api/yahoo/benchmarks') {
+        console.log('[BENCHMARKS] fetching QQQ and SPY performance');
+        var t0b = Date.now();
+        var benchSymbols = ['QQQ', 'SPY'];
+        var ranges = [
+            { key: '1d', range: '1d', interval: '5m' },
+            { key: '5d', range: '5d', interval: '1d' },
+            { key: '1mo', range: '1mo', interval: '1d' },
+            { key: 'ytd', range: 'ytd', interval: '1mo' },
+            { key: '1y', range: '1y', interval: '1mo' },
+        ];
+        var benchResult = {};
+
+        // Fetch all symbols x ranges in parallel (10 requests)
+        var allFetches = [];
+        for (var bi = 0; bi < benchSymbols.length; bi++) {
+            for (var ri = 0; ri < ranges.length; ri++) {
+                (function (sym, rng) {
+                    var bUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
+                        encodeURIComponent(sym) + '?range=' + rng.range + '&interval=' + rng.interval;
+                    allFetches.push(
+                        httpsGet(bUrl, YAHOO_HEADERS, 10000).then(function (r) {
+                            return { sym: sym, key: rng.key, status: r.status, body: r.body.toString() };
+                        }).catch(function () {
+                            return { sym: sym, key: rng.key, status: 0, body: null };
+                        })
+                    );
+                })(benchSymbols[bi], ranges[ri]);
+            }
+        }
+
+        var allResults = await Promise.all(allFetches);
+        for (var ai = 0; ai < allResults.length; ai++) {
+            var ar = allResults[ai];
+            if (!benchResult[ar.sym]) benchResult[ar.sym] = {};
+            if (ar.status === 200 && ar.body) {
+                try {
+                    var json = JSON.parse(ar.body);
+                    var meta = json.chart && json.chart.result && json.chart.result[0] && json.chart.result[0].meta;
+                    var opens = json.chart && json.chart.result && json.chart.result[0] &&
+                        json.chart.result[0].indicators && json.chart.result[0].indicators.quote &&
+                        json.chart.result[0].indicators.quote[0] && json.chart.result[0].indicators.quote[0].open;
+                    var startPrice = null;
+                    if (opens) {
+                        for (var oi = 0; oi < opens.length; oi++) {
+                            if (opens[oi] != null) { startPrice = opens[oi]; break; }
+                        }
+                    }
+                    if (!startPrice && meta) startPrice = meta.chartPreviousClose;
+                    var curPrice = meta ? meta.regularMarketPrice : null;
+                    if (startPrice && curPrice && startPrice > 0) {
+                        benchResult[ar.sym][ar.key] = ((curPrice - startPrice) / startPrice) * 100;
+                    } else {
+                        benchResult[ar.sym][ar.key] = null;
+                    }
+                } catch (e) {
+                    benchResult[ar.sym][ar.key] = null;
+                }
+            } else {
+                benchResult[ar.sym][ar.key] = null;
+            }
+        }
+
+        console.log('[BENCHMARKS] done in ' + (Date.now() - t0b) + 'ms');
+        sendJson(res, 200, benchResult);
+        return;
+    }
+
+    // Yahoo yields: fetch returns for multiple symbols across time ranges
     if (url.pathname === '/api/yahoo/yields') {
         var syms = (url.searchParams.get('symbols') || '').split(',').filter(Boolean);
         if (syms.length === 0) { sendJson(res, 400, { error: 'No symbols' }); return; }
@@ -218,26 +287,45 @@ http.createServer(async function (req, res) {
         var t0y2 = Date.now();
         var yieldsResult = {};
         var CONC = 3;
+        var yieldRanges = [
+            { key: '1d', range: '1d', interval: '5m' },
+            { key: '5d', range: '5d', interval: '1d' },
+            { key: '1mo', range: '1mo', interval: '1d' },
+            { key: 'ytd', range: 'ytd', interval: '1mo' },
+            { key: '1y', range: '1y', interval: '1mo' },
+        ];
+
+        function _extractReturn(chartJson) {
+            if (!chartJson || !chartJson.chart || !chartJson.chart.result || !chartJson.chart.result[0]) return null;
+            var m = chartJson.chart.result[0].meta;
+            var opArr = chartJson.chart.result[0].indicators &&
+                chartJson.chart.result[0].indicators.quote &&
+                chartJson.chart.result[0].indicators.quote[0] &&
+                chartJson.chart.result[0].indicators.quote[0].open;
+            var sp = null;
+            if (opArr) { for (var i2 = 0; i2 < opArr.length; i2++) { if (opArr[i2] != null) { sp = opArr[i2]; break; } } }
+            if (!sp && m) sp = m.chartPreviousClose;
+            var cp = m ? m.regularMarketPrice : null;
+            if (sp && cp && sp > 0) return ((cp - sp) / sp) * 100;
+            return null;
+        }
 
         for (var ci2 = 0; ci2 < syms.length; ci2 += CONC) {
             var chunk2 = syms.slice(ci2, ci2 + CONC);
             var chunkResults2 = await Promise.allSettled(chunk2.map(function (s) {
-                var ytdUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
-                    encodeURIComponent(s) + '?range=ytd&interval=1mo';
-                var oneYUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
-                    encodeURIComponent(s) + '?range=1y&interval=1mo';
-                return Promise.allSettled([
-                    httpsGet(ytdUrl, YAHOO_HEADERS, 8000),
-                    httpsGet(oneYUrl, YAHOO_HEADERS, 8000),
-                ]).then(function (results) {
-                    var ytdData = null, oneYData = null;
-                    if (results[0].status === 'fulfilled' && results[0].value.status === 200) {
-                        try { ytdData = JSON.parse(results[0].value.body.toString()); } catch (e) {}
-                    }
-                    if (results[1].status === 'fulfilled' && results[1].value.status === 200) {
-                        try { oneYData = JSON.parse(results[1].value.body.toString()); } catch (e) {}
-                    }
-                    return { symbol: s, ytd: ytdData, oneY: oneYData };
+                // Fetch all ranges for this symbol in parallel
+                var rangeFetches = yieldRanges.map(function (rng) {
+                    var yUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
+                        encodeURIComponent(s) + '?range=' + rng.range + '&interval=' + rng.interval;
+                    return httpsGet(yUrl, YAHOO_HEADERS, 8000).then(function (r) {
+                        if (r.status === 200) {
+                            try { return { key: rng.key, data: JSON.parse(r.body.toString()) }; } catch (e) {}
+                        }
+                        return { key: rng.key, data: null };
+                    }).catch(function () { return { key: rng.key, data: null }; });
+                });
+                return Promise.all(rangeFetches).then(function (results) {
+                    return { symbol: s, ranges: results };
                 });
             }));
             for (var cr2 = 0; cr2 < chunkResults2.length; cr2++) {
@@ -245,31 +333,14 @@ http.createServer(async function (req, res) {
                 if (chunkResults2[cr2].status === 'fulfilled') {
                     var v = chunkResults2[cr2].value;
                     var entry = {};
-                    // YTD: compare first open of year to current price
-                    if (v.ytd && v.ytd.chart && v.ytd.chart.result && v.ytd.chart.result[0]) {
-                        var meta = v.ytd.chart.result[0].meta;
-                        var opens = v.ytd.chart.result[0].indicators &&
-                            v.ytd.chart.result[0].indicators.quote &&
-                            v.ytd.chart.result[0].indicators.quote[0] &&
-                            v.ytd.chart.result[0].indicators.quote[0].open;
-                        var startPrice = opens && opens.length > 0 ? opens[0] : meta.chartPreviousClose;
-                        var curPrice = meta.regularMarketPrice;
-                        if (startPrice && curPrice && startPrice > 0) {
-                            entry.ytd = ((curPrice - startPrice) / startPrice) * 100;
-                        }
-                    }
-                    // 1Y: compare first open of 1y ago to current
-                    if (v.oneY && v.oneY.chart && v.oneY.chart.result && v.oneY.chart.result[0]) {
-                        var meta1 = v.oneY.chart.result[0].meta;
-                        var opens1 = v.oneY.chart.result[0].indicators &&
-                            v.oneY.chart.result[0].indicators.quote &&
-                            v.oneY.chart.result[0].indicators.quote[0] &&
-                            v.oneY.chart.result[0].indicators.quote[0].open;
-                        var startPrice1 = opens1 && opens1.length > 0 ? opens1[0] : meta1.chartPreviousClose;
-                        var curPrice1 = meta1.regularMarketPrice;
-                        if (startPrice1 && curPrice1 && startPrice1 > 0) {
-                            entry.oneYear = ((curPrice1 - startPrice1) / startPrice1) * 100;
-                        }
+                    for (var rri = 0; rri < v.ranges.length; rri++) {
+                        var rr = v.ranges[rri];
+                        var ret = _extractReturn(rr.data);
+                        if (rr.key === 'ytd') entry.ytd = ret;
+                        else if (rr.key === '1y') entry.oneYear = ret;
+                        else if (rr.key === '1d') entry.day1 = ret;
+                        else if (rr.key === '5d') entry.day5 = ret;
+                        else if (rr.key === '1mo') entry.month1 = ret;
                     }
                     yieldsResult[sym2] = entry;
                 } else {

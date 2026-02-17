@@ -407,6 +407,20 @@ const MarketData = (function () {
         return result;
     }
 
+    /** Fetch benchmark performance (QQQ/SPY) for multiple time ranges */
+    async function fetchBenchmarks() {
+        await _probeServer();
+        try {
+            var resp = await _serverFetch('/api/yahoo/benchmarks', 30000);
+            if (resp) {
+                return await resp.json();
+            }
+        } catch (e) {
+            console.warn('[Benchmarks] fetch error: ' + e.message);
+        }
+        return null;
+    }
+
     /** Fetch the current USD/ILS exchange rate via Yahoo Finance */
     async function fetchExchangeRate() {
         await _probeServer();
@@ -449,6 +463,7 @@ const MarketData = (function () {
         fetchQuotes: fetchQuotes,
         fetchYields: fetchYields,
         fetchPERatios: fetchPERatios,
+        fetchBenchmarks: fetchBenchmarks,
         fetchExchangeRate: fetchExchangeRate,
         getCached: getCached,
         clearCache: clearCache,
