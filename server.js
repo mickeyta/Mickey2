@@ -6,6 +6,7 @@ const path = require('path');
 const PORT = parseInt(process.env.PORT, 10) || 3001;
 const STATIC_DIR = __dirname;
 const NAME_CACHE_FILE = path.join(__dirname, 'fund-names-cache.json');
+const HISTORY_CACHE_FILE = path.join(__dirname, 'history-cache.json');
 
 /** Persistent fund name cache: { "507012": "Some Fund Name", ... } */
 var _fundNameCache = {};
@@ -35,6 +36,27 @@ function cacheFundName(id, name) {
 function getCachedFundName(id) {
     return _fundNameCache[id] || null;
 }
+
+/** Persistent history cache: { "SYMBOL": { timestamps: [...], closes: [...], fetchedAt: ms }, ... } */
+var _historyCache = {};
+try {
+    if (fs.existsSync(HISTORY_CACHE_FILE)) {
+        _historyCache = JSON.parse(fs.readFileSync(HISTORY_CACHE_FILE, 'utf8'));
+        console.log('[HISTORY CACHE] Loaded ' + Object.keys(_historyCache).length + ' symbols from cache');
+    }
+} catch (e) {
+    console.log('[HISTORY CACHE] Could not load: ' + e.message);
+}
+
+function saveHistoryCache() {
+    try {
+        fs.writeFileSync(HISTORY_CACHE_FILE, JSON.stringify(_historyCache), 'utf8');
+    } catch (e) {
+        console.log('[HISTORY CACHE] Could not save: ' + e.message);
+    }
+}
+
+var _HISTORY_CACHE_TTL = 6 * 3600 * 1000; // 6 hours
 
 const MIME = {
     '.html': 'text/html',
@@ -413,6 +435,99 @@ http.createServer(async function (req, res) {
 
         console.log('[YAHOO PE] done in ' + (Date.now() - t0pe) + 'ms');
         sendJson(res, 200, peResult);
+        return;
+    }
+
+    // Weekly history: fetch 1y of weekly close data for symbols + benchmarks
+    if (url.pathname === '/api/yahoo/history') {
+        var hSyms = (url.searchParams.get('symbols') || '').split(',').filter(Boolean);
+        // Always include benchmarks and FX
+        var allSyms = ['QQQ', 'SPY', 'USDILS=X'];
+        for (var hi = 0; hi < hSyms.length; hi++) {
+            if (allSyms.indexOf(hSyms[hi]) === -1) allSyms.push(hSyms[hi]);
+        }
+        console.log('[HISTORY] symbols=' + allSyms.join(','));
+        var t0h = Date.now();
+        var now = Date.now();
+
+        // Determine which symbols need fetching (not cached or cache expired)
+        var toFetch = [];
+        for (var si = 0; si < allSyms.length; si++) {
+            var s = allSyms[si];
+            var cached = _historyCache[s];
+            if (cached && cached.fetchedAt && (now - cached.fetchedAt < _HISTORY_CACHE_TTL)) {
+                console.log('  ' + s + ': using cache (' + Math.round((now - cached.fetchedAt) / 60000) + 'min old)');
+            } else {
+                toFetch.push(s);
+            }
+        }
+
+        // Fetch stale symbols from Yahoo (1y range, 1wk interval)
+        if (toFetch.length > 0) {
+            console.log('  Fetching: ' + toFetch.join(','));
+            var histFetches = toFetch.map(function (sym) {
+                var hUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
+                    encodeURIComponent(sym) + '?range=1y&interval=1wk';
+                return httpsGet(hUrl, YAHOO_HEADERS, 15000).then(function (r) {
+                    return { sym: sym, status: r.status, body: r.body.toString() };
+                }).catch(function (e) {
+                    return { sym: sym, status: 0, body: null, error: e.message };
+                });
+            });
+            var histResults = await Promise.all(histFetches);
+            for (var hri = 0; hri < histResults.length; hri++) {
+                var hr = histResults[hri];
+                if (hr.status === 200 && hr.body) {
+                    try {
+                        var hJson = JSON.parse(hr.body);
+                        var hResult = hJson.chart && hJson.chart.result && hJson.chart.result[0];
+                        if (hResult) {
+                            var ts = hResult.timestamp || [];
+                            var closes = hResult.indicators && hResult.indicators.quote &&
+                                hResult.indicators.quote[0] && hResult.indicators.quote[0].close || [];
+                            var adjCloses = hResult.indicators && hResult.indicators.adjclose &&
+                                hResult.indicators.adjclose[0] && hResult.indicators.adjclose[0].adjclose || closes;
+                            var currency = hResult.meta && hResult.meta.currency || 'USD';
+                            _historyCache[hr.sym] = {
+                                timestamps: ts,
+                                closes: adjCloses,
+                                currency: currency,
+                                fetchedAt: Date.now(),
+                            };
+                            console.log('  ' + hr.sym + ': got ' + ts.length + ' data points');
+                        }
+                    } catch (e) {
+                        console.log('  ' + hr.sym + ': parse error: ' + e.message);
+                    }
+                } else {
+                    console.log('  ' + hr.sym + ': HTTP ' + hr.status + (hr.error ? ' ' + hr.error : ''));
+                }
+            }
+            saveHistoryCache();
+        }
+
+        // Build response
+        var histResponse = {};
+        for (var ri2 = 0; ri2 < allSyms.length; ri2++) {
+            var rs = allSyms[ri2];
+            histResponse[rs] = _historyCache[rs] ? {
+                timestamps: _historyCache[rs].timestamps,
+                closes: _historyCache[rs].closes,
+                currency: _historyCache[rs].currency,
+            } : null;
+        }
+
+        console.log('[HISTORY] done in ' + (Date.now() - t0h) + 'ms');
+        sendJson(res, 200, histResponse);
+        return;
+    }
+
+    // Clear history cache
+    if (url.pathname === '/api/yahoo/history/clear-cache') {
+        _historyCache = {};
+        saveHistoryCache();
+        console.log('[HISTORY CACHE] Cleared');
+        sendJson(res, 200, { ok: true, message: 'History cache cleared' });
         return;
     }
 

@@ -557,6 +557,17 @@
                 </div>
             </div>
 
+            <!-- Performance Trend Chart -->
+            <div id="trendSection" style="display:none; margin-top: 20px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom: 12px;">
+                    <h3 style="color:#fff; font-size: 1.1rem; margin:0;">1-Year Performance Trend (ILS)</h3>
+                    <button id="clearHistoryCache" class="btn btn-secondary btn-small" style="font-size:0.75rem;">Clear History Cache</button>
+                </div>
+                <div style="background: rgba(255,255,255,0.03); border-radius: 8px; padding: 12px; position: relative; height: 320px;">
+                    <canvas id="trendChart"></canvas>
+                </div>
+            </div>
+
             <!-- Benchmark Comparison -->
             <div id="benchmarkSection" style="display:none; margin-top: 20px;">
                 <h3 style="color:#fff; margin-bottom: 12px; font-size: 1.1rem;">Portfolio vs Benchmarks</h3>
@@ -613,6 +624,7 @@
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <script src="market-data.js"></script>
     <script>
         // Portfolio data management
@@ -1075,6 +1087,243 @@
             section.style.display = 'block';
         }
 
+        // Trend chart instance
+        let trendChartInstance = null;
+
+        async function loadTrendChart() {
+            if (portfolio.length === 0) return;
+            const symbols = portfolio.map(s => s.name);
+            const historyData = await MarketData.fetchHistory(symbols);
+            if (!historyData) return;
+
+            const fxData = historyData['USDILS=X'];
+            if (!fxData || !fxData.timestamps || fxData.timestamps.length === 0) return;
+
+            // Build a week-aligned FX lookup: timestamp → USDILS close
+            const fxMap = {};
+            for (let i = 0; i < fxData.timestamps.length; i++) {
+                if (fxData.closes[i] != null) {
+                    fxMap[fxData.timestamps[i]] = fxData.closes[i];
+                }
+            }
+
+            // Collect all unique week timestamps across all symbols
+            const allTimestamps = new Set();
+            for (const sym of symbols) {
+                const d = historyData[sym];
+                if (d && d.timestamps) d.timestamps.forEach(t => allTimestamps.add(t));
+            }
+            ['QQQ', 'SPY'].forEach(sym => {
+                const d = historyData[sym];
+                if (d && d.timestamps) d.timestamps.forEach(t => allTimestamps.add(t));
+            });
+            fxData.timestamps.forEach(t => allTimestamps.add(t));
+
+            const weeks = Array.from(allTimestamps).sort((a, b) => a - b);
+            if (weeks.length < 2) return;
+
+            // Helper: get nearest FX rate for a timestamp
+            function getFxRate(ts) {
+                if (fxMap[ts]) return fxMap[ts];
+                // Find closest prior timestamp
+                let best = null, bestTs = 0;
+                for (const ft in fxMap) {
+                    const fts = parseInt(ft);
+                    if (fts <= ts && fts > bestTs) { bestTs = fts; best = fxMap[ft]; }
+                }
+                return best;
+            }
+
+            // Helper: build ILS-denominated % change series from raw close data
+            function buildILSSeries(symData) {
+                if (!symData || !symData.timestamps || symData.timestamps.length < 2) return null;
+                const isILS = symData.currency === 'ILA' || symData.currency === 'ILS';
+                // Map timestamp → close
+                const closeMap = {};
+                for (let i = 0; i < symData.timestamps.length; i++) {
+                    if (symData.closes[i] != null) {
+                        let c = symData.closes[i];
+                        if (symData.currency === 'ILA') c = c / 100; // agorot to ILS
+                        closeMap[symData.timestamps[i]] = c;
+                    }
+                }
+                // Find the first available close as baseline
+                let baseClose = null, baseFx = null;
+                for (const w of weeks) {
+                    if (closeMap[w] != null) {
+                        baseClose = closeMap[w];
+                        if (!isILS) baseFx = getFxRate(w);
+                        break;
+                    }
+                }
+                if (baseClose == null) return null;
+                if (!isILS && baseFx == null) return null;
+
+                const baseILS = isILS ? baseClose : baseClose * baseFx;
+                const points = [];
+                for (const w of weeks) {
+                    if (closeMap[w] != null) {
+                        let priceILS;
+                        if (isILS) {
+                            priceILS = closeMap[w];
+                        } else {
+                            const fx = getFxRate(w);
+                            if (fx == null) { points.push(null); continue; }
+                            priceILS = closeMap[w] * fx;
+                        }
+                        points.push(((priceILS - baseILS) / baseILS) * 100);
+                    } else {
+                        points.push(null);
+                    }
+                }
+                return points;
+            }
+
+            // Build portfolio weighted ILS return per week
+            // Weight by current market value in USD (same as benchmark comparison)
+            const stockWeights = [];
+            let totalWeight = 0;
+            for (const stock of portfolio) {
+                const quote = MarketData.getCached(stock.name);
+                const isILS = quote && quote.currency === 'ILS';
+                const hasPrice = quote && quote.price != null;
+                const price = hasPrice ? quote.price : stock.avgPrice;
+                let valueUSD = stock.amount * price;
+                if (isILS && usdIlsRate) valueUSD = valueUSD / usdIlsRate;
+                stockWeights.push({ sym: stock.name, weight: valueUSD });
+                totalWeight += valueUSD;
+            }
+
+            // Build per-stock ILS series
+            const stockSeries = {};
+            for (const sw of stockWeights) {
+                const series = buildILSSeries(historyData[sw.sym]);
+                if (series) stockSeries[sw.sym] = series;
+            }
+
+            // Weighted portfolio series
+            const portfolioSeries = [];
+            for (let wi = 0; wi < weeks.length; wi++) {
+                let wSum = 0, wTotal = 0;
+                for (const sw of stockWeights) {
+                    if (stockSeries[sw.sym] && stockSeries[sw.sym][wi] != null) {
+                        wSum += stockSeries[sw.sym][wi] * sw.weight;
+                        wTotal += sw.weight;
+                    }
+                }
+                portfolioSeries.push(wTotal > 0 ? wSum / wTotal : null);
+            }
+
+            // Build QQQ and SPY ILS series
+            const qqqSeries = buildILSSeries(historyData['QQQ']);
+            const spySeries = buildILSSeries(historyData['SPY']);
+
+            // Format week labels
+            const labels = weeks.map(ts => {
+                const d = new Date(ts * 1000);
+                return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
+            });
+
+            // Render chart
+            const ctx = document.getElementById('trendChart').getContext('2d');
+            if (trendChartInstance) trendChartInstance.destroy();
+
+            trendChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Portfolio',
+                            data: portfolioSeries,
+                            borderColor: '#00d4ff',
+                            backgroundColor: 'rgba(0,212,255,0.1)',
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            pointHoverRadius: 5,
+                            pointHoverBackgroundColor: '#00d4ff',
+                            tension: 0.3,
+                            fill: false,
+                            spanGaps: true,
+                        },
+                        {
+                            label: 'QQQ',
+                            data: qqqSeries || [],
+                            borderColor: '#ff6b6b',
+                            borderWidth: 1.5,
+                            pointRadius: 0,
+                            pointHoverRadius: 4,
+                            pointHoverBackgroundColor: '#ff6b6b',
+                            tension: 0.3,
+                            fill: false,
+                            spanGaps: true,
+                        },
+                        {
+                            label: 'SPY',
+                            data: spySeries || [],
+                            borderColor: '#ffd93d',
+                            borderWidth: 1.5,
+                            pointRadius: 0,
+                            pointHoverRadius: 4,
+                            pointHoverBackgroundColor: '#ffd93d',
+                            tension: 0.3,
+                            fill: false,
+                            spanGaps: true,
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    plugins: {
+                        legend: {
+                            labels: { color: '#ccd6f6', font: { size: 12 } },
+                        },
+                        tooltip: {
+                            backgroundColor: 'rgba(17,25,40,0.95)',
+                            titleColor: '#ccd6f6',
+                            bodyColor: '#e8e8e8',
+                            borderColor: 'rgba(255,255,255,0.1)',
+                            borderWidth: 1,
+                            padding: 10,
+                            displayColors: true,
+                            callbacks: {
+                                title: function(items) {
+                                    return items[0].label;
+                                },
+                                label: function(context) {
+                                    const val = context.parsed.y;
+                                    if (val == null) return context.dataset.label + ': --';
+                                    const sign = val >= 0 ? '+' : '';
+                                    return context.dataset.label + ': ' + sign + val.toFixed(2) + '%';
+                                },
+                            },
+                        },
+                    },
+                    scales: {
+                        x: {
+                            ticks: { color: '#8892b0', font: { size: 10 }, maxRotation: 45 },
+                            grid: { color: 'rgba(255,255,255,0.05)' },
+                        },
+                        y: {
+                            ticks: {
+                                color: '#8892b0',
+                                font: { size: 11 },
+                                callback: function(v) { return (v >= 0 ? '+' : '') + v.toFixed(1) + '%'; },
+                            },
+                            grid: { color: 'rgba(255,255,255,0.05)' },
+                        },
+                    },
+                },
+            });
+
+            document.getElementById('trendSection').style.display = 'block';
+        }
+
         // Refresh market data for all stocks in the portfolio
         async function refreshMarketData() {
             if (portfolio.length === 0) return;
@@ -1148,6 +1397,11 @@
                 document.getElementById('lastUpdated').textContent =
                     'Updated ' + now.toLocaleTimeString() +
                     (usdIlsRate ? ' (1$ = \u20AA' + usdIlsRate.toFixed(2) + ')' : '');
+
+                // Load trend chart in background (don't block UI)
+                loadTrendChart().catch(function(e) {
+                    console.warn('[TrendChart] ' + e.message);
+                });
             } catch (err) {
                 clearInterval(pulseInterval);
                 marketDataLoaded = true;
@@ -1354,6 +1608,22 @@
 
         // Refresh prices button
         document.getElementById('refreshPrices').addEventListener('click', refreshMarketData);
+
+        // Clear history cache button
+        document.getElementById('clearHistoryCache').addEventListener('click', async function() {
+            if (!confirm('Clear the historical data cache? Fresh data will be fetched on next refresh.')) return;
+            const btn = this;
+            btn.disabled = true;
+            btn.textContent = 'Clearing...';
+            try {
+                await MarketData.clearHistoryCache();
+                btn.textContent = 'Cleared!';
+                setTimeout(function() { btn.textContent = 'Clear History Cache'; btn.disabled = false; }, 2000);
+            } catch (e) {
+                btn.textContent = 'Error';
+                setTimeout(function() { btn.textContent = 'Clear History Cache'; btn.disabled = false; }, 2000);
+            }
+        });
 
         // Initialize
         loadPortfolio();

@@ -439,6 +439,34 @@ const MarketData = (function () {
         return null;
     }
 
+    /** Fetch 1-year weekly historical data for portfolio symbols + benchmarks */
+    async function fetchHistory(symbols) {
+        await _probeServer();
+        var syms = symbols || [];
+        try {
+            var resp = await _serverFetch(
+                '/api/yahoo/history?symbols=' + syms.map(encodeURIComponent).join(','), 60000);
+            if (resp) {
+                return await resp.json();
+            }
+        } catch (e) {
+            console.warn('[History] fetch error: ' + e.message);
+        }
+        return null;
+    }
+
+    /** Clear the server-side history cache */
+    async function clearHistoryCache() {
+        await _probeServer();
+        try {
+            var resp = await _serverFetch('/api/yahoo/history/clear-cache', 10000);
+            if (resp) return await resp.json();
+        } catch (e) {
+            console.warn('[History] clear cache error: ' + e.message);
+        }
+        return null;
+    }
+
     function getCached(symbol) {
         var c = _cache[symbol.toUpperCase()];
         if (!c) return null;
@@ -462,6 +490,8 @@ const MarketData = (function () {
         fetchPERatios: fetchPERatios,
         fetchBenchmarks: fetchBenchmarks,
         fetchExchangeRate: fetchExchangeRate,
+        fetchHistory: fetchHistory,
+        clearHistoryCache: clearHistoryCache,
         getCached: getCached,
         clearCache: clearCache,
     };
